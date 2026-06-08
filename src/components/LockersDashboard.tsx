@@ -11,6 +11,8 @@ import {
 } from 'lucide-react';
 import { AuthUser, CabinetKey, LoanDetails, KeyStatus, SyncLog } from '../types';
 import { SEED_KEYS } from '../data';
+import { ref, onValue, set, remove } from 'firebase/database';
+import { rtdb } from '../firebase';
 
 interface LockersDashboardProps {
   user: AuthUser;
@@ -49,20 +51,90 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
   const [syncHistory, setSyncHistory] = useState<SyncLog[]>([]);
   const [autoSync, setAutoSync] = useState(true);
 
-  // Load database
+  // Load database and listen/sync with Firebase Realtime Database in real-time
   useEffect(() => {
-    const stored = localStorage.getItem('unimeta_keys_db');
-    if (stored) {
-      const parsed = JSON.parse(stored);
-      if (!parsed.some((k: CabinetKey) => k.block === 'BLOCO C1')) {
-        setKeys(SEED_KEYS);
-        localStorage.setItem('unimeta_keys_db', JSON.stringify(SEED_KEYS));
+    let currentUsuariosTermos: any = null;
+    let currentArmarios: any = null;
+
+    const buildKeysState = (usuarios: any, armarios: any) => {
+      const updatedKeys: CabinetKey[] = [];
+      const blocks = ['BLOCO C1', 'BLOCO C2', 'BLOCO C3'];
+      
+      blocks.forEach(block => {
+        const prefix = block === 'BLOCO C1' ? 'C1' : block === 'BLOCO C2' ? 'C2' : 'C3';
+        for (let i = 1; i <= 24; i++) {
+          const dbKeyId = `${prefix}-${i}`;
+          
+          let status: KeyStatus = 'disponivel';
+          let currentLoan: LoanDetails | null = null;
+          
+          // Check if active rental exists in Firebase "armarios" node
+          const rental = armarios ? armarios[dbKeyId] : null;
+          if (rental) {
+            status = 'emprestada';
+            
+            // Try to find email from "usuarios_termos" matching the student uid/name
+            let email = '';
+            if (rental.uid && usuarios && usuarios[rental.uid]) {
+              email = usuarios[rental.uid].email || '';
+            }
+            if (!email && rental.nome) {
+              const sanitizedName = rental.nome.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, ".");
+              email = `${sanitizedName}@alunos.estacio.br`;
+            }
+            
+            currentLoan = {
+              userName: rental.nome || 'Identificado',
+              userEmail: email,
+              userPhone: rental.whats || '(68) 99999-9999',
+              userRole: 'ALUNO',
+              loanDate: rental.data || '2026-03-31',
+              dueDate: '2026-06-30',
+              semester: '2026.1'
+            };
+          }
+          
+          updatedKeys.push({
+            id: dbKeyId,
+            number: i,
+            block,
+            status,
+            currentLoan,
+            history: []
+          });
+        }
+      });
+      
+      setKeys(updatedKeys);
+    };
+
+    let unsubscribeArmarios: () => void = () => {};
+    let unsubscribeUsuarios: () => void = () => {};
+
+    try {
+      const armariosRef = ref(rtdb, 'armarios');
+      unsubscribeArmarios = onValue(armariosRef, (snapshot) => {
+        currentArmarios = snapshot.val();
+        buildKeysState(currentUsuariosTermos, currentArmarios);
+      }, (error) => {
+        console.error("Firebase error loading armarios:", error);
+      });
+
+      const usuariosRef = ref(rtdb, 'usuarios_termos');
+      unsubscribeUsuarios = onValue(usuariosRef, (snapshot) => {
+        currentUsuariosTermos = snapshot.val();
+        buildKeysState(currentUsuariosTermos, currentArmarios);
+      }, (error) => {
+        console.error("Firebase error loading usuarios_termos:", error);
+      });
+    } catch (e) {
+      console.error("Error setting up Firebase RTDB subscriptions:", e);
+      const stored = localStorage.getItem('unimeta_keys_db');
+      if (stored) {
+        setKeys(JSON.parse(stored));
       } else {
-        setKeys(parsed);
+        setKeys(SEED_KEYS);
       }
-    } else {
-      setKeys(SEED_KEYS);
-      localStorage.setItem('unimeta_keys_db', JSON.stringify(SEED_KEYS));
     }
 
     // Seed Sync Historical Log
@@ -71,12 +143,17 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
       setSyncHistory(JSON.parse(storedLogs));
     } else {
       const initialLogs: SyncLog[] = [
-        { id: '1', timestamp: '2026-06-08 10:00:15', type: 'MANUAL', status: 'SUCESSO', recordsSynced: 124, message: 'Dados escolares importados via gateway Estácio SIA.' },
-        { id: '2', timestamp: '2026-06-07 01:00:00', type: 'AUTO', status: 'SUCESSO', recordsSynced: 120, message: 'Sincronização agendada diária concluída.' }
+        { id: '1', timestamp: '2026-06-08 15:30:15', type: 'AUTO', status: 'SUCESSO', recordsSynced: 32, message: 'Dados escolares conectados em Tempo Real com o Firebase.' },
+        { id: '2', timestamp: '2026-06-07 01:00:00', type: 'AUTO', status: 'SUCESSO', recordsSynced: 32, message: 'Sucesso de conexão com chaves-estacio.' }
       ];
       setSyncHistory(initialLogs);
       localStorage.setItem('unimeta_sync_logs', JSON.stringify(initialLogs));
     }
+
+    return () => {
+      unsubscribeArmarios();
+      unsubscribeUsuarios();
+    };
   }, []);
 
   const saveKeys = (updated: CabinetKey[]) => {
@@ -118,7 +195,7 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
     triggerToast(`Chave ${formattedId} cadastrada com sucesso!`);
   };
 
-  // Perform Loan (Empréstimo)
+  // Perform Loan (Empréstimo sincronizado com Firebase)
   const handlePerformLoan = (e: React.FormEvent) => {
     e.preventDefault();
     if (!isLoaningKey || !loanName || !loanEmail || !loanPhone) return;
@@ -133,54 +210,42 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
       return;
     }
 
-    const updated = keys.map(k => {
-      if (k.id === isLoaningKey.id) {
-        const loan: LoanDetails = {
-          userName: loanName,
-          userEmail: loanEmail.toLowerCase().trim(),
-          userPhone: loanPhone,
-          userRole: loanRole,
-          loanDate: new Date().toISOString().split('T')[0],
-          dueDate: dueDate,
-          semester: '2026.1'
-        };
-        return {
-          ...k,
-          status: 'emprestada' as KeyStatus,
-          currentLoan: loan
-        };
-      }
-      return k;
-    });
+    const dateStr = new Date().toLocaleDateString('pt-BR');
 
-    saveKeys(updated);
+    try {
+      set(ref(rtdb, `armarios/${isLoaningKey.id}`), {
+        data: dateStr,
+        nome: loanName.trim().toUpperCase(),
+        whats: loanPhone.replace(/\D/g, ''),
+        uid: ""
+      }).then(() => {
+        triggerToast(`Chave ${isLoaningKey.id} alocada com sucesso no Firebase!`);
+      }).catch((err) => {
+        console.error("Firebase error loaning key:", err);
+        triggerToast("Erro de gravação no Firebase.", "alert");
+      });
+    } catch (err) {
+      console.error(err);
+    }
+
     setIsLoaningKey(null);
     setLoanName('');
     setLoanEmail('');
     setLoanPhone('');
-    triggerToast(`Chave ${isLoaningKey.id} emprestada para ${loanName}.`);
   };
 
-  // Perform Devolution (Devolução)
+  // Perform Devolution (Devolução sincronizada com Firebase)
   const handleReceiveDevolution = (keyId: string) => {
-    const updated = keys.map(k => {
-      if (k.id === keyId && k.currentLoan) {
-        const finishedLoan = {
-          ...k.currentLoan,
-          returnedDate: new Date().toISOString().split('T')[0]
-        };
-        return {
-          ...k,
-          status: 'disponivel' as KeyStatus,
-          currentLoan: null,
-          history: [finishedLoan, ...k.history]
-        };
-      }
-      return k;
-    });
-
-    saveKeys(updated);
-    triggerToast(`Delegação finalizada! A chave ${keyId} foi devolvida à recepção.`);
+    try {
+      remove(ref(rtdb, `armarios/${keyId}`)).then(() => {
+        triggerToast(`Delegação finalizada! O armário ${keyId} está livre no Firebase.`);
+      }).catch((err) => {
+        console.error("Firebase error returning key:", err);
+        triggerToast("Erro de gravação no Firebase.", "alert");
+      });
+    } catch (err) {
+      console.error(err);
+    }
   };
 
   // Toggle maintenance state
@@ -238,31 +303,61 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
     triggerToast(`Sistema Acadêmico Sincronizado! ${randomCount} alunos importados com sucesso.`);
   };
 
-  // JSON MOUNT: Import Firebase Database
+  // JSON MOUNT: Import Firebase Database and synchronize in Real-time
   const handleImportJson = () => {
     try {
       if (!importText.trim()) return;
       const parsed = JSON.parse(importText);
       
-      // Basic type validation
-      if (Array.isArray(parsed)) {
-        // Assume array of Keys
-        const formatted = parsed.map((item: any, i: number) => {
-          return {
-            id: item.id || `CH-${Math.floor(10 + Math.random() * 90)}`,
-            number: item.number || (i + 1),
-            block: item.block || 'Ala de Importação Firebase',
-            status: item.status || 'disponivel',
-            currentLoan: item.currentLoan || null,
-            history: item.history || []
-          };
+      // Check if it is the Firebase RTDB JSON structure with "armarios" or raw object map
+      let armariosObj: any = null;
+      if (parsed && typeof parsed === 'object') {
+        if (parsed.armarios) {
+          armariosObj = parsed.armarios;
+        } else if (!Array.isArray(parsed)) {
+          const keysList = Object.keys(parsed);
+          if (keysList.length > 0 && keysList.every(k => k.includes('-') && typeof parsed[k] === 'object')) {
+            armariosObj = parsed;
+          }
+        }
+      }
+
+      if (armariosObj) {
+        set(ref(rtdb, 'armarios'), armariosObj).then(() => {
+          triggerToast(`Coleção de armários sincronizada com sucesso no Firebase em Tempo Real!`);
+          setShowImporter(false);
+          setImportText('');
+        }).catch((err) => {
+          console.error("Firebase import set error:", err);
+          triggerToast("Falha ao salvar dados de importação no Firebase.", "alert");
         });
-        saveKeys(formatted);
-        setShowImporter(false);
-        setImportText('');
-        triggerToast(`Firebase Importado! ${formatted.length} chaves sincronizadas com seu painel.`);
+        return;
+      }
+
+      // Basic type validation for traditional array of CabinetKeys
+      if (Array.isArray(parsed)) {
+        const newArmarios: any = {};
+        parsed.forEach((item: any) => {
+          if (item.status === 'emprestada' && item.currentLoan) {
+            newArmarios[item.id] = {
+              data: item.currentLoan.loanDate || new Date().toLocaleDateString('pt-BR'),
+              nome: item.currentLoan.userName,
+              whats: item.currentLoan.userPhone.replace(/\D/g, ''),
+              uid: ""
+            };
+          }
+        });
+
+        set(ref(rtdb, 'armarios'), newArmarios).then(() => {
+          triggerToast(`Armários importados e sincronizados no Firebase com sucesso!`);
+          setShowImporter(false);
+          setImportText('');
+        }).catch((err) => {
+          console.error("Firebase import array error:", err);
+          triggerToast("Erro ao sincronizar lote com Firebase.", "alert");
+        });
       } else {
-        triggerToast('Formato JSON inválido. O objeto raiz deve ser uma lista de chaves representando as coleções do Firestore.', 'alert');
+        triggerToast('Formato JSON inválido. Cole a exportação do Firebase ou um array de chaves.', 'alert');
       }
     } catch (e) {
       triggerToast('Erro de sintaxe no JSON colado. Verifique os colchetes e vírgulas.', 'alert');
