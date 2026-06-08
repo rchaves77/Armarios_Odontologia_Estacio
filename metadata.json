@@ -1,0 +1,6 @@
+{
+  "name": "Estácio Unimeta - Controle de Chaves Odonto",
+  "description": "Plataforma de controle de chaves de armários da clínica de odontologia da Coordenação de Odontologia do Centro Universitário Estácio Unimeta.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
