@@ -3,11 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
-import { motion } from 'motion/react';
-import { Smile, Mail, Lock, Phone, User, GraduationCap, ShieldAlert, CheckCircle } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
+import { Smile, Mail, Lock, Phone, User, GraduationCap, ShieldAlert, CheckCircle, Camera } from 'lucide-react';
 import { AuthUser, UserRole } from '../types';
 import { DEMO_ADMINS, DEMO_USERS } from '../data';
+import { ref, set, onValue } from 'firebase/database';
+import { rtdb } from '../firebase';
 
 interface AuthScreenProps {
   onLogin: (user: AuthUser) => void;
@@ -23,6 +25,89 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
   const [semester, setSemester] = useState('');
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+
+  // Terms and conditions state
+  const [agreedToTerms, setAgreedToTerms] = useState(false);
+  const [showTermsModal, setShowTermsModal] = useState(false);
+
+  // Camera & Photo State
+  const [showCamera, setShowCamera] = useState(false);
+  const [photoBase64, setPhotoBase64] = useState<string | null>(null);
+  const [cameraLoading, setCameraLoading] = useState(false);
+  
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  // Cached Firebase Users to support full cross-device login matching
+  const [firebaseUsers, setFirebaseUsers] = useState<Record<string, any>>({});
+
+  useEffect(() => {
+    const unsubscribe = onValue(ref(rtdb, 'usuarios_termos'), (snapshot) => {
+      if (snapshot.exists()) {
+        setFirebaseUsers(snapshot.val());
+      }
+    }, (err) => {
+      console.warn("Erro ao ler usuários cadastrados para login integrado:", err);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, []);
+
+  const startCamera = async () => {
+    setError('');
+    setCameraLoading(true);
+    try {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 300, height: 300, facingMode: 'user' }
+      });
+      streamRef.current = stream;
+      setShowCamera(true);
+      // Wait a tick for videoRef to mount before binding
+      setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
+      }, 100);
+    } catch (e: any) {
+      console.error(e);
+      setError('Não foi possível acessar a câmera do seu dispositivo. Por favor, libere as permissões de vídeo ou tente novamente.');
+    } finally {
+      setCameraLoading(false);
+    }
+  };
+
+  const stopCamera = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    setShowCamera(false);
+  };
+
+  const capturePhoto = () => {
+    if (videoRef.current) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 300;
+      canvas.height = 300;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(videoRef.current, 0, 0, 300, 300);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+        setPhotoBase64(dataUrl);
+      }
+      stopCamera();
+    }
+  };
 
   // Auto-detect role from email domain
   const detectRole = (emailStr: string): UserRole => {
@@ -43,14 +128,36 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
 
     const cleanEmail = email.toLowerCase().trim();
 
-    // 1. Look up in demo registers or localStorage
-    const allRegistered: AuthUser[] = [
-      ...DEMO_ADMINS,
-      ...DEMO_USERS,
-      ...JSON.parse(localStorage.getItem('unimeta_custom_users') || '[]'),
-    ];
+    // 1. Look up in Firebase registered users
+    let matchUser: AuthUser | undefined = undefined;
+    if (firebaseUsers) {
+      const matchEntry = Object.entries(firebaseUsers).find(([uid, u]: [string, any]) => {
+        return u.email?.toLowerCase().trim() === cleanEmail;
+      });
+      if (matchEntry) {
+        const [uid, uRaw] = matchEntry;
+        const u = uRaw as any;
+        matchUser = {
+          uid,
+          name: u.name,
+          email: u.email,
+          phone: u.phone,
+          role: u.role,
+          registrationNumber: u.registrationNumber || '',
+          semesterOfEntry: u.semesterOfEntry || undefined
+        };
+      }
+    }
 
-    const matchUser = allRegistered.find(u => u.email.toLowerCase() === cleanEmail);
+    // 2. Look up in demo registers or localStorage
+    if (!matchUser) {
+      const allRegistered: AuthUser[] = [
+        ...DEMO_ADMINS,
+        ...DEMO_USERS,
+        ...JSON.parse(localStorage.getItem('unimeta_custom_users') || '[]'),
+      ];
+      matchUser = allRegistered.find(u => u.email.toLowerCase() === cleanEmail);
+    }
 
     if (matchUser) {
       onLogin(matchUser);
@@ -104,17 +211,31 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
       return;
     }
 
+    if (!photoBase64) {
+      setError('Atenção: A captura da foto do seu rosto (📸 Tirar Foto) é obrigatória para habilitar o seu perfil clínico e possibilitar auditorias ou cobranças.');
+      return;
+    }
+
+    if (!agreedToTerms) {
+      setError('Atenção: Você precisa ler e aceitar o Termo de Responsabilidade e Uso da Estácio Unimeta para cadastrar seu perfil clínico.');
+      return;
+    }
+
     // Save user to localStorage list of registered users
     const currentCustom = JSON.parse(localStorage.getItem('unimeta_custom_users') || '[]');
     
-    if (currentCustom.some((u: AuthUser) => u.email.toLowerCase() === cleanEmail)) {
+    // Cross check in custom cache and Firebase users Cache
+    const existsInLocal = currentCustom.some((u: AuthUser) => u.email.toLowerCase() === cleanEmail);
+    const existsInFirebase = firebaseUsers && Object.values(firebaseUsers).some((u: any) => u.email?.toLowerCase().trim() === cleanEmail);
+    
+    if (existsInLocal || existsInFirebase) {
       setError('Este endereço de e-mail já está cadastrado no sistema.');
       return;
     }
 
     const newUser: AuthUser = {
       uid: 'u_' + Date.now(),
-      name,
+      name: name.toUpperCase(),
       email: cleanEmail,
       phone,
       role,
@@ -122,10 +243,26 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
       semesterOfEntry: role === 'ALUNO' ? (semester || '2026.1') : undefined
     };
 
+    // Save to Firebase RTDB for full global accessibility
+    set(ref(rtdb, `usuarios_termos/${newUser.uid}`), {
+      uid: newUser.uid,
+      name: newUser.name,
+      email: newUser.email,
+      phone: newUser.phone,
+      role: newUser.role,
+      registrationNumber: newUser.registrationNumber,
+      semesterOfEntry: newUser.semesterOfEntry || "",
+      foto: photoBase64
+    }).then(() => {
+      console.log("Cadastro persistido no Firebase com sucesso!");
+    }).catch(err => {
+      console.error("Database save failed:", err);
+    });
+
     currentCustom.push(newUser);
     localStorage.setItem('unimeta_custom_users', JSON.stringify(currentCustom));
 
-    setSuccess('Inscrição realizada com sucesso! Você já pode realizar o seu login.');
+    setSuccess('Cadastro clínico realizado com sucesso! Sua foto facial foi vinculada e você já pode se autenticar.');
     setIsLogin(true);
     // Auto populate login fields
     setEmail(cleanEmail);
@@ -411,6 +548,132 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
               </div>
             </div>
 
+            {/* Registro de Foto Clínico Facial */}
+            <div className="rounded-xl border border-slate-800 bg-slate-950/25 p-3.5 space-y-3">
+              <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5 font-mono">
+                <Camera className="h-4 w-4 text-orange-400" /> Foto Facial de Identificação *
+              </label>
+
+              {showCamera ? (
+                <div className="space-y-3">
+                  <div className="relative mx-auto rounded-xl overflow-hidden border border-orange-500/30 max-w-[220px] aspect-square bg-[#030712] flex items-center justify-center">
+                    <video
+                      ref={videoRef}
+                      autoPlay
+                      playsInline
+                      muted
+                      className="w-full h-full object-cover transform scale-x-[-1]"
+                    />
+                    <div className="absolute inset-0 border-4 border-dashed border-orange-400/40 rounded-full m-6 animate-pulse pointer-events-none" />
+                    <span className="absolute bottom-2 left-1/2 -translate-x-1/2 text-[9px] font-mono tracking-wider bg-orange-600 text-white px-2 py-0.5 rounded-full font-bold uppercase animate-pulse">
+                      Ao vivo
+                    </span>
+                  </div>
+                  <div className="flex gap-2 justify-center max-w-[220px] mx-auto">
+                    <button
+                      id="btn-auth-capture-photo"
+                      type="button"
+                      onClick={capturePhoto}
+                      className="w-full rounded bg-orange-600 hover:bg-orange-500 text-white text-xs font-bold py-1.5 transition-all cursor-pointer shadow hover:shadow-orange-755"
+                    >
+                      Capturar Foto
+                    </button>
+                    <button
+                      id="btn-auth-cancel-camera"
+                      type="button"
+                      onClick={stopCamera}
+                      className="rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs py-1.5 px-3 transition-colors cursor-pointer"
+                    >
+                      Voltar
+                    </button>
+                  </div>
+                </div>
+              ) : photoBase64 ? (
+                <div className="flex items-center gap-4 bg-slate-900/40 p-2.5 rounded-lg border border-slate-800">
+                  <div className="relative shrink-0">
+                    <img
+                      src={photoBase64}
+                      alt="Sua foto acadêmica"
+                      className="w-16 h-16 rounded-lg object-cover border border-slate-700 bg-slate-100"
+                    />
+                    <div className="absolute -top-1.5 -right-1.5 bg-emerald-500 text-slate-950 p-0.5 rounded-full ring-2 ring-slate-900">
+                      <CheckCircle className="h-3.5 w-3.5 text-emerald-950 fill-emerald-500 stroke-2" />
+                    </div>
+                  </div>
+                  <div className="flex-1 min-w-0 text-left">
+                    <p className="text-[11px] font-bold text-teal-400">Foto Registrada com Sucesso!</p>
+                    <p className="text-[9px] text-slate-400 mt-0.5 leading-snug">Sua foto foi integrada ao seu perfil clínico de chaves.</p>
+                    <button
+                      id="btn-auth-retake-photo"
+                      type="button"
+                      onClick={startCamera}
+                      className="text-[10px] text-orange-400 hover:text-orange-300 font-bold underline mt-1.5 block cursor-pointer"
+                    >
+                      Tirar Outra Foto
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-center p-4 border border-dashed border-slate-800 rounded-lg bg-slate-950/20">
+                  <div className="mx-auto w-12 h-12 rounded-full bg-slate-900/60 flex items-center justify-center text-slate-400 mb-2">
+                    <Camera className="h-6 w-6 text-slate-400" />
+                  </div>
+                  <p className="text-[11px] text-slate-400 leading-normal max-w-[240px] mx-auto">
+                    A captura da foto facial é obrigatória para habilitar o seu perfil clínico no sistema.
+                  </p>
+                  <button
+                    id="btn-auth-start-camera"
+                    type="button"
+                    onClick={startCamera}
+                    disabled={cameraLoading}
+                    className="mt-3 inline-flex items-center gap-1 text-xs font-bold text-orange-400 hover:text-orange-300 transition-colors bg-orange-950/20 active:bg-orange-950/45 px-3 py-1.5 rounded-lg border border-orange-950 cursor-pointer"
+                  >
+                    {cameraLoading ? 'Iniciando câmera...' : 'Capturar Foto do Rosto'}
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Termo de Responsabilidade e Uso */}
+            <div className="space-y-2 border-t border-slate-850 pt-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-300">Termo de Responsabilidade *</span>
+                <button
+                  id="btn-auth-open-terms"
+                  type="button"
+                  onClick={() => setShowTermsModal(true)}
+                  className="text-[10px] text-orange-400 hover:text-orange-300 font-bold underline flex items-center gap-1 cursor-pointer"
+                >
+                  Ler em tela cheia / Imprimir Termo
+                </button>
+              </div>
+
+              {/* Scrollable Terms Container */}
+              <div className="w-full h-24 rounded-lg bg-slate-950/60 border border-slate-850 p-2.5 text-[9.5px] text-slate-400 overflow-y-auto leading-relaxed text-left scrollbar-thin select-none">
+                <p className="font-extrabold text-slate-300 mb-1 uppercase text-[10px]">TERMO DE RESPONSABILIDADE E USO – ESTÁCIO UNIMETA</p>
+                <p className="mb-2">O usuário declara estar ciente de que os armários da clínica são rotativos e destinados exclusivamente ao uso temporário durante as atividades acadêmicas.</p>
+                <p className="mb-2">A Estácio Unimeta isenta-se de qualquer responsabilidade por perda, dano, dolo, furto ou sumiço de materiais, equipamentos ou valores guardados nos armários. O zelo pelo cadeado/chave e pelo conteúdo é de inteira responsabilidade do aluno.</p>
+                <p>Ao final do semestre letivo, a chave deve ser devolvida imediatamente após o último uso, sob pena de bloqueio de uso no semestre seguinte.</p>
+              </div>
+
+              {/* Checkbox agreement */}
+              <label 
+                id="label-auth-agreement"
+                className="flex items-start gap-2 text-[10px] text-slate-300 cursor-pointer select-none text-left pt-1"
+              >
+                <input
+                  id="register-terms-checkbox"
+                  type="checkbox"
+                  className="rounded border-slate-800 text-orange-600 focus:ring-orange-500 focus:ring-offset-slate-900 bg-slate-950 w-3.5 h-3.5 mt-0.5 shrink-0 cursor-pointer"
+                  checked={agreedToTerms}
+                  onChange={(e) => setAgreedToTerms(e.target.checked)}
+                />
+                <span className="leading-tight">
+                  Li, entendi e concordo integralmente com os termos descritos no Termo de Responsabilidade e Uso da Estácio Unimeta. *
+                </span>
+              </label>
+            </div>
+
             <button
               id="btn-register-submit"
               type="submit"
@@ -479,6 +742,184 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
           </div>
         </div>
       </motion.div>
+
+      {/* TERMO DE RESPONSABILIDADE MODAL */}
+      <AnimatePresence>
+        {showTermsModal && (
+          <div id="terms-modal-overlay" className="fixed inset-0 z-55 flex items-center justify-center p-4 bg-black/85 backdrop-blur-xs">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-slate-900 border border-slate-800 text-white rounded-2xl p-6 max-w-lg w-full shadow-2xl relative space-y-4"
+            >
+              <div className="flex justify-between items-center border-b border-slate-800/80 pb-3">
+                <div className="flex items-center gap-2 text-orange-400">
+                  <Smile className="h-5 w-5" />
+                  <h3 className="text-sm font-bold uppercase tracking-wider font-mono">Termo de Responsabilidade</h3>
+                </div>
+                <button
+                  id="btn-close-terms-modal"
+                  type="button"
+                  onClick={() => setShowTermsModal(false)}
+                  className="text-slate-400 hover:text-white transition-colors text-xs font-bold font-mono px-2 py-1 rounded bg-slate-800"
+                >
+                  FECHAR
+                </button>
+              </div>
+
+              <div className="space-y-3 text-xs text-slate-300 text-left leading-relaxed max-h-72 overflow-y-auto pr-2 scrollbar-thin">
+                <p className="font-extrabold text-white text-center text-sm border-b border-slate-800 pb-2 mb-2 uppercase">
+                  TERMO DE RESPONSABILIDADE E USO – ESTÁCIO UNIMETA
+                </p>
+                <div className="space-y-2.5">
+                  <p className="p-3 bg-slate-950/40 rounded border border-slate-850 leading-normal">
+                    <strong>1. Uso Temporário e Rotativo:</strong> O usuário declara estar ciente de que os armários da clínica são rotativos e destinados exclusivamente ao uso temporário durante as atividades acadêmicas.
+                  </p>
+                  <p className="p-3 bg-slate-950/40 rounded border border-slate-850 leading-normal">
+                    <strong>2. Isenção de Responsabilidade de Perdas:</strong> A Estácio Unimeta isenta-se de qualquer responsabilidade por perda, dano, dolo, furto ou sumiço de materiais, equipamentos ou valores guardados nos armários. O zelo pelo cadeado/chave e pelo conteúdo é de inteira responsabilidade do aluno.
+                  </p>
+                  <p className="p-3 bg-slate-950/40 rounded border border-slate-850 leading-normal">
+                    <strong>3. Devolução e Penalidades:</strong> Ao final do semestre letivo, a chave deve ser devolvida imediatamente após o último uso, sob pena de bloqueio de uso no semestre seguinte.
+                  </p>
+                </div>
+                <p className="text-[10px] text-slate-400 italic pt-2">
+                  * Este termo de responsabilidade constitui validação eletrônica em tempo de registro com foto oficial do estudante discente cadastrado no sistema.
+                </p>
+              </div>
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  id="btn-print-terms-modal"
+                  type="button"
+                  onClick={() => {
+                    window.print();
+                  }}
+                  className="flex-1 bg-slate-800 hover:bg-slate-750 text-white font-extrabold transition-all py-2.5 rounded-lg text-xs uppercase flex items-center justify-center gap-2 cursor-pointer border border-slate-700"
+                >
+                  🖨️ Imprimir Termo
+                </button>
+                <button
+                  id="btn-agree-close-terms-modal"
+                  type="button"
+                  onClick={() => {
+                    setAgreedToTerms(true);
+                    setShowTermsModal(false);
+                  }}
+                  className="flex-1 bg-orange-600 hover:bg-orange-500 text-white font-extrabold transition-all py-2.5 rounded-lg text-xs uppercase flex items-center justify-center gap-2 cursor-pointer shadow-md"
+                >
+                  Concordar e Fechar
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* PRINT-ONLY CSS STYLES & PRINTABLE DOCUMENT */}
+      <style>{`
+        @media print {
+          /* Hide all page content during print */
+          body * {
+            visibility: hidden !important;
+          }
+          /* Show only the targeted print element */
+          #printable-term, #printable-term * {
+            visibility: visible !important;
+          }
+          #printable-term {
+            position: absolute !important;
+            left: 0 !important;
+            top: 0 !important;
+            width: 100% !important;
+            background: white !important;
+            color: black !important;
+            display: block !important;
+            font-family: sans-serif !important;
+          }
+        }
+      `}</style>
+
+      {/* DOCUMENTO DE IMPRESSÃO (ESTÁTICO OU COM DADOS PREENCHIDOS) */}
+      <div id="printable-term" className="hidden bg-white text-black p-10 max-w-4xl mx-auto font-sans text-xs tracking-normal leading-relaxed">
+        <div className="border-b-2 border-black pb-4 mb-6 flex justify-between items-start">
+          <div>
+            <h1 className="text-xl font-extrabold uppercase text-black">Centro Universitário Estácio Unimeta</h1>
+            <p className="text-[10px] uppercase text-gray-600 font-bold">Curso de Odontologia – Termo Clínico de Armários</p>
+          </div>
+          <div className="text-right text-[9px] text-gray-500 font-mono">
+            MATRÍCULA: {registration || '________________'} <br />
+            DATA EMISSÃO: {new Date().toLocaleDateString('pt-BR')} {new Date().toLocaleTimeString('pt-BR')}
+          </div>
+        </div>
+
+        <h2 className="text-center text-sm font-black uppercase text-black tracking-wide mb-6">
+          TERMO DE RESPONSABILIDADE E USO DE ARMÁRIOS ACADÊMICOS
+        </h2>
+
+        {/* Informações do discente */}
+        <div className="grid grid-cols-2 gap-4 border border-gray-300 p-4 rounded-md mb-6 bg-gray-50">
+          <div>
+            <p className="text-[8px] font-bold text-gray-500 uppercase">Nome do Discente</p>
+            <p className="font-extrabold text-black uppercase text-xs">{name || '_________________________________________'}</p>
+          </div>
+          <div>
+            <p className="text-[8px] font-bold text-gray-500 uppercase">E-mail de Cadastro</p>
+            <p className="font-bold text-black text-xs">{email || '_________________________________________'}</p>
+          </div>
+          <div>
+            <p className="text-[8px] font-bold text-gray-500 uppercase">Celular / WhatsApp de Contato</p>
+            <p className="font-bold text-black text-xs">{phone || '______________________'}</p>
+          </div>
+          <div>
+            <p className="text-[8px] font-bold text-gray-500 uppercase">Curso / Semestre</p>
+            <p className="font-bold text-black text-xs">ODONTOLOGIA – {semester || '2026.1'}</p>
+          </div>
+        </div>
+
+        {/* Texto do Termo */}
+        <div className="space-y-4 text-gray-800 text-[11px] text-justify border border-gray-300 p-6 rounded-md mb-6 bg-white leading-relaxed">
+          <p className="font-bold text-black">
+            O usuário acima identificado declara estar ciente de que os armários da clínica são rotativos e destinados exclusivamente ao uso temporário durante as atividades acadêmicas.
+          </p>
+          <p>
+            A Estácio Unimeta isenta-se de qualquer responsabilidade por perda, dano, dolo, furto ou sumiço de materiais, equipamentos ou valores guardados nos armários. O zelo pelo cadeado/chave e pelo conteúdo é de inteira responsabilidade do aluno.
+          </p>
+          <p className="font-semibold text-black">
+            Ao final do semestre letivo, a chave deve ser devolvida imediatamente após o último uso, sob pena de bloqueio de uso no semestre seguinte.
+          </p>
+        </div>
+
+        {/* Foto de identificação do print se existir */}
+        <div className="mb-8 flex items-center gap-4 border border-gray-300 p-3 rounded-md w-fit">
+          {photoBase64 ? (
+            <img src={photoBase64} alt="Preenchimento Biométrico" className="w-16 h-16 object-cover rounded border border-gray-400 bg-gray-50" />
+          ) : (
+            <div className="w-16 h-16 border border-dashed border-gray-400 flex items-center justify-center text-[8px] text-gray-400 uppercase font-bold text-center leading-none p-1">
+              Foto Facial Biométrica
+            </div>
+          )}
+          <div>
+            <h4 className="text-[10px] font-black uppercase text-black">Assinatura Biométrica Digital</h4>
+            <p className="text-[9px] text-gray-500 leading-normal max-w-[280px]">
+              O perfil clínico de usuário foi validado eletronicamente e atrelado com fotografia facial no banco de dados sincronizado.
+            </p>
+          </div>
+        </div>
+
+        {/* Linhas de Assinatura */}
+        <div className="grid grid-cols-2 gap-12 mt-12 text-center text-xs pt-10">
+          <div className="border-t border-gray-400 pt-3">
+            <p className="font-black uppercase text-black text-[10px]">{name || 'Mariana de Souza Costa'}</p>
+            <p className="text-[9px] text-gray-500 uppercase">Assinatura do Discente (Titular)</p>
+          </div>
+          <div className="border-t border-gray-400 pt-3">
+            <p className="font-black uppercase text-black text-[10px]">Estácio Unimeta Práxis</p>
+            <p className="text-[9px] text-gray-500 uppercase">Coordenação / Secretaria Odontologia</p>
+          </div>
+        </div>
+      </div>
+
       <div className="absolute bottom-4 left-0 right-0 text-center text-[10px] text-slate-500 font-mono tracking-wider">
         Desenvolvido por <span className="text-orange-400/80 font-bold">Rômulo Chaves - SerClin Tec</span>
       </div>

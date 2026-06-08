@@ -18,6 +18,7 @@ export interface AuthUser {
 export type KeyStatus = 'disponivel' | 'emprestada' | 'manutencao' | 'atrasada';
 
 export interface LoanDetails {
+  uid?: string;
   userName: string;
   userEmail: string;
   userPhone: string;

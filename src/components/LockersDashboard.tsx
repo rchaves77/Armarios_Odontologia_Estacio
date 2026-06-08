@@ -7,7 +7,8 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Key, Filter, Plus, Search, CheckCircle, RefreshCcw, 
-  Send, AlertTriangle, Download, Database, Users, Check, Clock, Trash2, Edit3 
+  Send, AlertTriangle, Download, Database, Users, Check, Clock, Trash2, Edit3,
+  User, Mail, Phone, ShieldCheck, Smile
 } from 'lucide-react';
 import { AuthUser, CabinetKey, LoanDetails, KeyStatus, SyncLog } from '../types';
 import { SEED_KEYS } from '../data';
@@ -21,6 +22,7 @@ interface LockersDashboardProps {
 
 export default function LockersDashboard({ user }: LockersDashboardProps) {
   const [keys, setKeys] = useState<CabinetKey[]>([]);
+  const [firebaseUsers, setFirebaseUsers] = useState<Record<string, any>>({});
   const [selectedMapKey, setSelectedMapKey] = useState<CabinetKey | null>(null);
   const [search, setSearch] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('todos');
@@ -52,102 +54,128 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
   const [syncHistory, setSyncHistory] = useState<SyncLog[]>([]);
   const [autoSync, setAutoSync] = useState(true);
 
+  // Firebase Realtime Status & Configuration guidance
+  const [firebaseStatus, setFirebaseStatus] = useState<'connecting' | 'connected' | 'auth_error' | 'permission_denied'>('connecting');
+  const [firebaseErrorMessage, setFirebaseErrorMessage] = useState('');
+
   // Load database and listen/sync with Firebase Realtime Database in real-time
   useEffect(() => {
-    // Authenticate with Firebase if not already authenticated to satisfy "auth != null"
-    if (!auth.currentUser) {
-      signInAnonymously(auth)
-        .then(() => {
-          console.log("Firebase Auth: Autenticado anonimamente com sucesso!");
-        })
-        .catch((err) => {
-          console.error("Firebase Auth: Erro ao autenticar anonimamente. Verifique se o provedor Anônimo está ativo no console.", err);
-        });
-    }
-
-    let currentUsuariosTermos: any = null;
-    let currentArmarios: any = null;
-
-    const buildKeysState = (usuarios: any, armarios: any) => {
-      const updatedKeys: CabinetKey[] = [];
-      const blocks = ['BLOCO C1', 'BLOCO C2', 'BLOCO C3'];
-      
-      blocks.forEach(block => {
-        const prefix = block === 'BLOCO C1' ? 'C1' : block === 'BLOCO C2' ? 'C2' : 'C3';
-        for (let i = 1; i <= 24; i++) {
-          const dbKeyId = `${prefix}-${i}`;
-          
-          let status: KeyStatus = 'disponivel';
-          let currentLoan: LoanDetails | null = null;
-          
-          // Check if active rental exists in Firebase "armarios" node
-          const rental = armarios ? armarios[dbKeyId] : null;
-          if (rental) {
-            status = 'emprestada';
-            
-            // Try to find email from "usuarios_termos" matching the student uid/name
-            let email = '';
-            if (rental.uid && usuarios && usuarios[rental.uid]) {
-              email = usuarios[rental.uid].email || '';
-            }
-            if (!email && rental.nome) {
-              const sanitizedName = rental.nome.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, ".");
-              email = `${sanitizedName}@alunos.estacio.br`;
-            }
-            
-            currentLoan = {
-              userName: rental.nome || 'Identificado',
-              userEmail: email,
-              userPhone: rental.whats || '(68) 99999-9999',
-              userRole: 'ALUNO',
-              loanDate: rental.data || '2026-03-31',
-              dueDate: '2026-06-30',
-              semester: '2026.1'
-            };
-          }
-          
-          updatedKeys.push({
-            id: dbKeyId,
-            number: i,
-            block,
-            status,
-            currentLoan,
-            history: []
-          });
-        }
-      });
-      
-      setKeys(updatedKeys);
-    };
-
     let unsubscribeArmarios: () => void = () => {};
     let unsubscribeUsuarios: () => void = () => {};
 
-    try {
-      const armariosRef = ref(rtdb, 'armarios');
-      unsubscribeArmarios = onValue(armariosRef, (snapshot) => {
-        currentArmarios = snapshot.val();
-        buildKeysState(currentUsuariosTermos, currentArmarios);
-      }, (error) => {
-        console.error("Firebase error loading armarios:", error);
-      });
+    // Coordenador de estado de autenticação (evita permission_denied imediato antes das credenciais estarem prontas)
+    const unsubscribeAuth = auth.onAuthStateChanged((firebaseUser) => {
+      if (firebaseUser) {
+        console.log("Firebase Auth: Usuário autenticado com sucesso!", firebaseUser.uid);
+        
+        let currentUsuariosTermos: any = null;
+        let currentArmarios: any = null;
 
-      const usuariosRef = ref(rtdb, 'usuarios_termos');
-      unsubscribeUsuarios = onValue(usuariosRef, (snapshot) => {
-        currentUsuariosTermos = snapshot.val();
-        buildKeysState(currentUsuariosTermos, currentArmarios);
-      }, (error) => {
-        console.error("Firebase error loading usuarios_termos:", error);
-      });
-    } catch (e) {
-      console.error("Error setting up Firebase RTDB subscriptions:", e);
-      const stored = localStorage.getItem('unimeta_keys_db');
-      if (stored) {
-        setKeys(JSON.parse(stored));
+        const buildKeysState = (usuarios: any, armarios: any) => {
+          const updatedKeys: CabinetKey[] = [];
+          const blocks = ['BLOCO C1', 'BLOCO C2', 'BLOCO C3'];
+          
+          blocks.forEach(block => {
+            const prefix = block === 'BLOCO C1' ? 'C1' : block === 'BLOCO C2' ? 'C2' : 'C3';
+            for (let i = 1; i <= 24; i++) {
+              const dbKeyId = `${prefix}-${i}`;
+              
+              let status: KeyStatus = 'disponivel';
+              let currentLoan: LoanDetails | null = null;
+              
+              // Check if rentals exist in Firebase "armarios" node
+              const rental = armarios ? armarios[dbKeyId] : null;
+              if (rental) {
+                status = 'emprestada';
+                
+                // Find matching email or generate a fallback
+                let email = '';
+                let phone = rental.whats || '(68) 99999-9999';
+                let role: any = 'ALUNO';
+                
+                if (rental.uid && usuarios && usuarios[rental.uid]) {
+                  email = usuarios[rental.uid].email || '';
+                  phone = usuarios[rental.uid].phone || phone;
+                  role = usuarios[rental.uid].role || 'ALUNO';
+                }
+                if (!email && rental.nome) {
+                  const sanitizedName = rental.nome.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, ".");
+                  email = `${sanitizedName}@alunos.estacio.br`;
+                }
+                
+                currentLoan = {
+                  uid: rental.uid || '',
+                  userName: rental.nome || 'Identificado',
+                  userEmail: email,
+                  userPhone: phone,
+                  userRole: role,
+                  loanDate: rental.data || '2026-03-31',
+                  dueDate: '2026-06-30',
+                  semester: '2026.1'
+                };
+              }
+              
+              updatedKeys.push({
+                id: dbKeyId,
+                number: i,
+                block,
+                status,
+                currentLoan,
+                history: []
+              });
+            }
+          });
+          
+          setKeys(updatedKeys);
+        };
+
+        try {
+          if (unsubscribeArmarios) unsubscribeArmarios();
+          if (unsubscribeUsuarios) unsubscribeUsuarios();
+
+          const armariosRef = ref(rtdb, 'armarios');
+          unsubscribeArmarios = onValue(armariosRef, (snapshot) => {
+            currentArmarios = snapshot.val();
+            buildKeysState(currentUsuariosTermos, currentArmarios);
+            setFirebaseStatus('connected');
+          }, (error) => {
+            console.error("Firebase error loading armarios:", error);
+            if (error.message && error.message.includes("permission_denied")) {
+              setFirebaseStatus('permission_denied');
+              setFirebaseErrorMessage("Suas regras do Firebase requerem autenticação ou bloqueiam leitura pública nos armários.");
+            }
+          });
+
+          const usuariosRef = ref(rtdb, 'usuarios_termos');
+          unsubscribeUsuarios = onValue(usuariosRef, (snapshot) => {
+            currentUsuariosTermos = snapshot.val() || {};
+            setFirebaseUsers(currentUsuariosTermos);
+            buildKeysState(currentUsuariosTermos, currentArmarios);
+          }, (error) => {
+            console.error("Firebase error loading usuarios_termos:", error);
+            if (error.message && error.message.includes("permission_denied")) {
+              setFirebaseStatus('permission_denied');
+              setFirebaseErrorMessage("Permissão negada para ler o nó 'usuarios_termos'.");
+            }
+          });
+        } catch (e: any) {
+          console.error("Erro ao registrar assinaturas no Database:", e);
+          setFirebaseStatus('permission_denied');
+          setFirebaseErrorMessage(e.message || "Erro de permissão.");
+        }
       } else {
-        setKeys(SEED_KEYS);
+        console.log("Firebase Auth: Nenhum usuário autenticado detectado. Autenticando com signInAnonymously...");
+        signInAnonymously(auth)
+          .then(() => {
+            console.log("Firebase Auth: Autenticação anônima estabelecida!");
+          })
+          .catch((err) => {
+            console.error("Firebase Auth: Falha no login anônimo", err);
+            setFirebaseStatus('auth_error');
+            setFirebaseErrorMessage(err.message || "Erro ao conectar de forma anônima.");
+          });
       }
-    }
+    });
 
     // Seed Sync Historical Log
     const storedLogs = localStorage.getItem('unimeta_sync_logs');
@@ -163,6 +191,7 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
     }
 
     return () => {
+      unsubscribeAuth();
       unsubscribeArmarios();
       unsubscribeUsuarios();
     };
@@ -419,6 +448,32 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
 
   return (
     <div className="space-y-6">
+      {/* SAUDAÇÃO PERSONALIZADA DO USUÁRIO */}
+      <div className="bg-gradient-to-r from-slate-900 to-slate-850 rounded-2xl p-6 text-white shadow-lg border border-slate-800 relative overflow-hidden">
+        <div className="absolute -right-10 -bottom-10 w-40 h-40 bg-orange-500/10 rounded-full blur-2xl pointer-events-none" />
+        <div className="relative flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <h2 className="text-xl md:text-2xl font-black tracking-tight uppercase flex items-center gap-2">
+              <Smile className="h-6 w-6 text-orange-400 shrink-0" /> Saudações, <span className="text-orange-400">{user.name}</span>!
+            </h2>
+            <p className="text-xs md:text-sm text-slate-300 font-medium">
+              Você está ativo no <strong className="text-white">Gerenciador de Armários da Clínica de Odontologia Estácio Unimeta</strong>. 
+              {user.role === 'ADMIN' ? (
+                " Seu painel de administração geral e central de monitoramento em tempo real está totalmente operacional."
+              ) : (
+                " Seu perfil discente clínico está ativo. Selecione ou gerencie seu armário rotativo com rapidez."
+              )}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 bg-slate-800/65 px-3 py-1.5 rounded-xl border border-slate-700/50 w-fit shrink-0">
+            <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+            <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-300">
+              Sessão: {user.role === 'ADMIN' ? 'Administrador' : user.role === 'PROFESSOR' ? 'Docente' : 'Discente Clínico'}
+            </span>
+          </div>
+        </div>
+      </div>
+
       {/* Toast Notification Container */}
       <AnimatePresence>
         {toastMessage && (
@@ -436,6 +491,97 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* FIREBASE REALTIME SYNC STATUS BANNER */}
+      <div className="rounded-xl border bg-white p-4 shadow-xs">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className={`p-2 rounded-lg ${
+              firebaseStatus === 'connected' ? 'bg-teal-50 text-teal-600' :
+              firebaseStatus === 'connecting' ? 'bg-indigo-50 text-indigo-600' :
+              'bg-rose-50 text-rose-600'
+            }`}>
+              <Database className="h-5 w-5 animate-pulse-slow" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h4 className="text-sm font-bold text-slate-800">Conexão Firebase Realtime Database</h4>
+                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold font-mono ${
+                  firebaseStatus === 'connected' ? 'bg-teal-100 text-teal-800' :
+                  firebaseStatus === 'connecting' ? 'bg-indigo-100 text-indigo-800 animate-pulse' :
+                  'bg-rose-100 text-rose-800'
+                }`}>
+                  {firebaseStatus === 'connected' ? 'CONECTADO E SINC' :
+                   firebaseStatus === 'connecting' ? 'CONECTANDO...' :
+                   'REQUER AJUSTE NO CONSOLE'}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                {firebaseStatus === 'connected' ? (
+                  "Seu banco de dados oficial 'chaves-estacio' está ativo em tempo real. Todas as alterações refletem instantaneamente para os alunos."
+                ) : firebaseStatus === 'connecting' ? (
+                  "Autenticando e assinando os canais em tempo real..."
+                ) : (
+                  "O Firebase retornou restrição de credibilidade (leitura/escrita bloqueada pelas regras no Console)."
+                )}
+              </p>
+            </div>
+          </div>
+          {firebaseStatus === 'connected' && (
+            <span className="text-[10px] text-slate-400 font-mono self-end md:self-auto bg-slate-50 px-2 py-1 rounded">
+              Sincronizado: chaves-estacio-default-rtdb
+            </span>
+          )}
+        </div>
+
+        {/* GUIDANCE COLLAPSIBLE FOR PERMISSION ERRORS */}
+        {(firebaseStatus === 'permission_denied' || firebaseStatus === 'auth_error') && (
+          <div className="mt-4 border-t border-slate-100 pt-4 text-xs text-slate-600 leading-relaxed bg-slate-50 p-3.5 rounded-lg border border-slate-200">
+            <h5 className="font-bold text-rose-950 flex items-center gap-1">
+              <AlertTriangle className="h-4 w-4 text-rose-600" /> Como resolver o erro de permissão no seu Firebase:
+            </h5>
+            <p className="mt-1 text-[11px]">
+              Suas regras estão configuradas com <code className="bg-slate-200 px-1 py-0.5 rounded text-rose-700">"auth != null"</code>, exigindo logins válidos antes de ler/gravar dados. Siga uma das soluções abaixo no Console do seu Firebase para sanar isso de vez:
+            </p>
+            
+            <div className="grid md:grid-cols-2 gap-4 mt-3">
+              <div className="bg-white p-3 rounded border border-slate-200 shadow-2xs">
+                <p className="font-bold text-slate-800 text-[11px]">Opção A (Recomendado - Ativar Login Anônimo)</p>
+                <ol className="list-decimal list-inside mt-1 space-y-1 text-[11px] text-slate-600">
+                  <li>Abra o <a href="https://console.firebase.google.com/" target="_blank" rel="noreferrer" className="text-blue-600 hover:underline font-semibold">Console do Firebase</a>.</li>
+                  <li>Acesse <strong>Authentication</strong> (menu lateral) e clique na aba <strong>Sign-in method</strong>.</li>
+                  <li>Ative o provedor <strong>Anônimo (Anonymous)</strong> e salve as alterações.</li>
+                </ol>
+                <span className="text-[10px] text-teal-600 block mt-2">✔ Essa aplicação tentará autenticar de forma anônima automaticamente em seguida!</span>
+              </div>
+
+              <div className="bg-white p-3 rounded border border-slate-200 shadow-2xs">
+                <p className="font-bold text-slate-800 text-[11px]">Opção B (Liberar Acesso Público Temporário)</p>
+                <p className="text-[10px] text-slate-500 mt-0.5">Se preferir testar em ambiente livre sem necessidade de autenticação:</p>
+                <ol className="list-decimal list-inside mt-1 space-y-1 text-[11px] text-slate-600">
+                  <li>No menu do Firebase, vá em <strong>Realtime Database</strong>.</li>
+                  <li>Acesse a aba <strong>Rules</strong> (Regras).</li>
+                  <li>Mude as regras para ler e escrever livremente:</li>
+                </ol>
+                <pre className="bg-slate-100 p-1.5 rounded text-[9px] font-mono mt-1 text-slate-700">
+{`{
+  "rules": {
+    ".read": true,
+    ".write": true
+  }
+}`}
+                </pre>
+              </div>
+            </div>
+
+            {firebaseErrorMessage && (
+              <div className="mt-3 text-[10px] font-mono bg-rose-50 border border-rose-150 p-2 rounded text-rose-700">
+                Log do Erro: {firebaseErrorMessage}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* ADMIN LEVEL CORE STATS */}
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
@@ -1198,35 +1344,108 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
 
                 {selectedMapKey.currentLoan ? (
                   <div className="space-y-3">
-                    <h4 className="font-bold text-slate-700 uppercase font-mono text-[10px] tracking-wide border-b border-slate-100 pb-1.5">Portador Ativo</h4>
-                    {isAdmin ? (
-                      <div className="space-y-2 bg-slate-50/50 p-3.5 rounded-xl border border-slate-100">
-                        <p className="font-bold text-slate-800 flex items-center gap-2 text-sm">
-                          {selectedMapKey.currentLoan.userName}
-                          <span className="text-[9px] px-2 py-0.5 rounded-full bg-slate-150 text-slate-700 font-mono font-bold">
-                            {selectedMapKey.currentLoan.userRole}
-                          </span>
-                        </p>
-                        <div className="grid grid-cols-2 gap-3 text-slate-650 mt-2">
-                          <div>
-                            <p className="text-[9px] text-slate-400 uppercase font-bold">Telefone</p>
-                            <p className="font-medium text-slate-800">{selectedMapKey.currentLoan.userPhone}</p>
-                          </div>
-                          <div>
-                            <p className="text-[9px] text-slate-400 uppercase font-bold">E-mail</p>
-                            <p className="font-medium text-slate-800 truncate" title={selectedMapKey.currentLoan.userEmail}>{selectedMapKey.currentLoan.userEmail}</p>
-                          </div>
-                          <div>
-                            <p className="text-[9px] text-slate-400 uppercase font-bold">Data Empréstimo</p>
-                            <p className="font-mono font-medium text-slate-800">{selectedMapKey.currentLoan.loanDate}</p>
-                          </div>
-                          <div>
-                            <p className="text-[9px] text-slate-400 uppercase font-bold">Prazo Limite</p>
-                            <p className="font-mono font-bold text-orange-600">{selectedMapKey.currentLoan.dueDate}</p>
+                    {isAdmin ? (() => {
+                      const getOccupantPhoto = () => {
+                        const uid = selectedMapKey.currentLoan?.uid;
+                        if (uid && firebaseUsers[uid] && firebaseUsers[uid].foto) {
+                          return firebaseUsers[uid].foto;
+                        }
+                        const match = Object.values(firebaseUsers).find((u: any) => {
+                          return u.email?.toLowerCase().trim() === selectedMapKey.currentLoan?.userEmail?.toLowerCase().trim() ||
+                                 u.name?.toLowerCase().trim() === selectedMapKey.currentLoan?.userName?.toLowerCase().trim();
+                        });
+                        return (match as any)?.foto || null;
+                      };
+                      const userPhoto = getOccupantPhoto();
+                      const rawDigits = selectedMapKey.currentLoan.userPhone.replace(/\D/g, '');
+                      const waPhone = rawDigits.startsWith('55') ? rawDigits : `55${rawDigits}`;
+                      const waText = encodeURIComponent(`Olá, ${selectedMapKey.currentLoan.userName}! Sou o admin da Gestão de Chaves de Odontologia Estácio Unimeta. Lembro que você está com a chave do armário ${selectedMapKey.id}. Quando concluir suas atividades clínicas, favor realizar a devolução na secretaria. Obrigado!`);
+                      const waUrl = `https://api.whatsapp.com/send?phone=${waPhone}&text=${waText}`;
+
+                      return (
+                        <div className="space-y-4">
+                          <div className="rounded-2xl border bg-slate-900 p-5 text-white shadow-xl relative overflow-hidden">
+                            <div className="absolute -top-12 -right-12 w-24 h-24 rounded-full bg-orange-500/10 blur-xl pointer-events-none" />
+                            <div className="flex justify-between items-center border-b border-slate-850 pb-2.5 mb-3.5">
+                              <span className="text-[9px] uppercase tracking-widest font-black text-orange-400 font-mono flex items-center gap-1">
+                                <ShieldCheck className="h-3.5 w-3.5 text-orange-400 shrink-0" /> CARD DE IDENTIFICAÇÃO ADMIN
+                              </span>
+                              <span className="text-[9px] text-slate-500 font-bold font-mono text-right">ODONTO UNIMETA</span>
+                            </div>
+
+                            <div className="flex items-start gap-4">
+                              <div className="shrink-0">
+                                {userPhoto ? (
+                                  <img 
+                                    src={userPhoto} 
+                                    alt="Foto de Identificação" 
+                                    className="w-20 h-20 rounded-xl object-cover border border-slate-700 shadow-md bg-slate-800" 
+                                    referrerPolicy="no-referrer"
+                                  />
+                                ) : (
+                                  <div className="w-20 h-20 rounded-xl border border-dashed border-slate-800 bg-slate-950 flex flex-col items-center justify-center text-slate-500 text-center p-1 leading-none">
+                                    <User className="h-6 w-6 text-slate-600 mb-1" />
+                                    <span className="text-[7.5px] font-bold uppercase font-mono">Sem Foto</span>
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="flex-1 min-w-0 text-left">
+                                <h4 className="text-sm font-black text-white uppercase tracking-tight truncate leading-tight mb-1" title={selectedMapKey.currentLoan.userName}>
+                                  {selectedMapKey.currentLoan.userName}
+                                </h4>
+                                <span className="inline-block text-[8.5px] uppercase tracking-wider font-extrabold text-orange-400 bg-orange-950/40 border border-orange-900/30 rounded px-1.5 py-0.2 mb-2 font-mono">
+                                  {selectedMapKey.currentLoan.userRole === 'PROFESSOR' ? 'PROFESSOR' : 'DISCENTE'}
+                                </span>
+                                
+                                <div className="space-y-1 text-slate-400 text-[10px]">
+                                  <p className="truncate font-sans flex items-center gap-1" title={selectedMapKey.currentLoan.userEmail}>
+                                    <Mail className="h-3 w-3 text-slate-500 shrink-0" /> {selectedMapKey.currentLoan.userEmail}
+                                  </p>
+                                  <p className="font-mono flex items-center gap-1">
+                                    <Phone className="h-3 w-3 text-slate-500 shrink-0" /> {selectedMapKey.currentLoan.userPhone}
+                                  </p>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-3 mt-4 pt-3 border-t border-slate-850 text-[10px] text-left">
+                              <div>
+                                <span className="block text-[8px] uppercase tracking-wider font-bold text-slate-500 font-mono">Retirado Clínico</span>
+                                <strong className="text-slate-200 font-mono">{selectedMapKey.currentLoan.loanDate}</strong>
+                              </div>
+                              <div>
+                                <span className="block text-[8px] uppercase tracking-wider font-bold text-slate-500 font-mono">Prazo Semestre</span>
+                                <strong className="text-orange-450 font-mono font-bold">{selectedMapKey.currentLoan.dueDate}</strong>
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2 mt-4">
+                              <a
+                                id={`id-card-btn-whatsapp-${selectedMapKey.id}`}
+                                href={waUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold py-1.8 transition-all cursor-pointer text-[10px] uppercase shadow shadow-emerald-950/20"
+                              >
+                                <Phone className="h-3.5 w-3.5" /> Cobrar (Whats)
+                              </a>
+                              <button
+                                id={`id-card-btn-devolver-${selectedMapKey.id}`}
+                                type="button"
+                                onClick={() => {
+                                  handleReceiveDevolution(selectedMapKey.id);
+                                  setSelectedMapKey(null);
+                                }}
+                                className="flex items-center justify-center gap-1.5 rounded-lg bg-orange-600 hover:bg-orange-550 text-white font-extrabold py-1.8 transition-all cursor-pointer text-[10px] uppercase shadow shadow-orange-950/20"
+                              >
+                                <CheckCircle className="h-3.5 w-3.5" /> Devolver
+                              </button>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    ) : (
+                      );
+                    })() : (
                       <div className="p-4 text-center text-slate-550 italic bg-amber-50/40 rounded-xl border border-amber-100 leading-relaxed">
                         {user.email.toLowerCase().trim() === selectedMapKey.currentLoan.userEmail.toLowerCase().trim() ? (
                           <div className="space-y-2">
@@ -1254,6 +1473,39 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
                   <div className="text-center p-6 bg-slate-50/60 rounded-xl border border-slate-100 text-slate-500 space-y-2">
                     <p className="font-medium text-slate-600">Nenhum empréstimo ativo registrado.</p>
                     <p className="text-[10px] text-slate-400">O armário está limpo e disponível para novas alocações clínicas.</p>
+                    
+                    {!isAdmin && (
+                      <div className="pt-3 border-t border-slate-100 mt-3 space-y-2">
+                        <p className="text-[11px] text-orange-600 font-bold">Deseja reservar o armário {selectedMapKey.id} para você?</p>
+                        <button
+                          id="btn-student-reserve-directly"
+                          type="button"
+                          onClick={() => {
+                            const hasLocker = keys.some(k => k.currentLoan && k.currentLoan.userEmail?.toLowerCase().trim() === user.email.toLowerCase().trim());
+                            if (hasLocker) {
+                              triggerToast("Você já possui um armário reservado na clínica! Devolva o seu armário anterior para prosseguir.", "alert");
+                              return;
+                            }
+                            
+                            set(ref(rtdb, `armarios/${selectedMapKey.id}`), {
+                              data: new Date().toLocaleDateString('pt-BR'),
+                              nome: user.name.toUpperCase(),
+                              whats: user.phone.replace(/\D/g, ''),
+                              uid: user.uid
+                            }).then(() => {
+                              triggerToast(`Armário ${selectedMapKey.id} reservado com sucesso no seu nome!`);
+                              setSelectedMapKey(null);
+                            }).catch((err) => {
+                              console.error(err);
+                              triggerToast("Erro ao efetuar reserva no Firebase.", "alert");
+                            });
+                          }}
+                          className="w-full rounded bg-orange-600 hover:bg-orange-700 text-white font-extrabold py-2 text-xs transition-colors cursor-pointer shadow-md inline-flex items-center justify-center gap-1.5"
+                        >
+                          <Key className="h-3.5 w-3.5" /> Reservar este Armário
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
 
