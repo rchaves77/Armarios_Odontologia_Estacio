@@ -1,5 +1,6 @@
 import { initializeApp } from "firebase/app";
 import { getDatabase } from "firebase/database";
+import { getAuth } from "firebase/auth";
 import { getAnalytics } from "firebase/analytics";
 
 const firebaseConfig = {
@@ -18,6 +19,9 @@ const app = initializeApp(firebaseConfig);
 
 // Initialize Realtime Database
 export const rtdb = getDatabase(app);
+
+// Initialize Firebase Auth
+export const auth = getAuth(app);
 
 // Safe Analytics Initialization for Sandboxed/iFrame environments
 try {

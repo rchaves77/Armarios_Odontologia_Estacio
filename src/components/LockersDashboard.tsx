@@ -12,7 +12,8 @@ import {
 import { AuthUser, CabinetKey, LoanDetails, KeyStatus, SyncLog } from '../types';
 import { SEED_KEYS } from '../data';
 import { ref, onValue, set, remove } from 'firebase/database';
-import { rtdb } from '../firebase';
+import { signInAnonymously } from 'firebase/auth';
+import { rtdb, auth } from '../firebase';
 
 interface LockersDashboardProps {
   user: AuthUser;
@@ -53,6 +54,17 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
 
   // Load database and listen/sync with Firebase Realtime Database in real-time
   useEffect(() => {
+    // Authenticate with Firebase if not already authenticated to satisfy "auth != null"
+    if (!auth.currentUser) {
+      signInAnonymously(auth)
+        .then(() => {
+          console.log("Firebase Auth: Autenticado anonimamente com sucesso!");
+        })
+        .catch((err) => {
+          console.error("Firebase Auth: Erro ao autenticar anonimamente. Verifique se o provedor Anônimo está ativo no console.", err);
+        });
+    }
+
     let currentUsuariosTermos: any = null;
     let currentArmarios: any = null;
 
