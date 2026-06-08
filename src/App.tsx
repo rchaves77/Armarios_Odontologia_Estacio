@@ -15,6 +15,45 @@ import LockersDashboard from './components/LockersDashboard';
 import AcademicPortal from './components/AcademicPortal';
 import TermoEstagioForm from './components/TermoEstagioForm';
 import NpsPopups from './components/NpsPopups';
+import { ref, onValue } from 'firebase/database';
+import { rtdb } from './firebase';
+
+const getInitials = (fullName: string): string => {
+  if (!fullName) return 'U';
+  const parts = fullName.trim().toUpperCase().split(/\s+/);
+  if (parts.length === 1) return parts[0].charAt(0);
+  
+  const first = parts[0].charAt(0);
+  let lastPart = '';
+  // Skip common relational prepositions to find the actual last surname initials
+  for (let i = parts.length - 1; i > 0; i--) {
+    const word = parts[i];
+    if (!['DA', 'DE', 'DO', 'DOS', 'DAS', 'E'].includes(word)) {
+      lastPart = parts[i].charAt(0);
+      break;
+    }
+  }
+  if (!lastPart) lastPart = parts[1].charAt(0);
+  return first + lastPart;
+};
+
+const formatDisplayName = (fullName: string): string => {
+  if (!fullName) return '';
+  const parts = fullName.trim().split(/\s+/);
+  if (parts.length <= 1) return fullName;
+  
+  const first = parts[0];
+  const last = parts[parts.length - 1];
+  
+  const capitalize = (str: string) => str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
+  
+  const prepositions = ['da', 'de', 'do', 'dos', 'das', 'e'];
+  const pre = parts[parts.length - 2];
+  if (pre && prepositions.includes(pre.toLowerCase()) && parts.length > 2) {
+    return `${capitalize(first)} ${pre.toLowerCase()} ${capitalize(last)}`;
+  }
+  return `${capitalize(first)} ${capitalize(last)}`;
+};
 
 export default function App() {
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -34,6 +73,56 @@ export default function App() {
       setLoading(false);
     }
   }, []);
+
+  // Real-time synchronization of the active user profile name from Firebase (usuarios_termos)
+  useEffect(() => {
+    if (!user) return;
+
+    const userRef = ref(rtdb, 'usuarios_termos');
+    const unsubscribe = onValue(userRef, (snapshot) => {
+      if (snapshot.exists()) {
+        const allUsers = snapshot.val();
+        let matchedUserObj: any = null;
+
+        for (const [uid, uData] of Object.entries(allUsers)) {
+          const u = uData as any;
+          const matchesUid = uid === user.uid || u?.uid === user.uid;
+          const matchesEmail = u?.email?.toLowerCase().trim() === user.email.toLowerCase().trim();
+
+          if (matchesUid || matchesEmail) {
+            matchedUserObj = { ...(u || {}), detectedUid: uid };
+            break;
+          }
+        }
+
+        if (matchedUserObj && matchedUserObj.name) {
+          const cleanedDbName = matchedUserObj.name.trim().toUpperCase();
+          const cleanedLocalName = user.name.trim().toUpperCase();
+
+          if (cleanedDbName !== cleanedLocalName || matchedUserObj.role !== user.role || matchedUserObj.phone !== user.phone) {
+            console.log(`[PROFILE SYNC] Sincronizando nome do Firebase: "${user.name}" -> "${cleanedDbName}"`);
+            
+            const updatedUser: AuthUser = {
+              ...user,
+              uid: matchedUserObj.uid || matchedUserObj.detectedUid || user.uid,
+              name: cleanedDbName,
+              phone: matchedUserObj.phone || user.phone,
+              role: matchedUserObj.role || user.role,
+              registrationNumber: matchedUserObj.registrationNumber || user.registrationNumber,
+              semesterOfEntry: matchedUserObj.semesterOfEntry || user.semesterOfEntry
+            };
+
+            setUser(updatedUser);
+            localStorage.setItem('unimeta_active_user', JSON.stringify(updatedUser));
+          }
+        }
+      }
+    }, (err) => {
+      console.warn("Falha ao sincronizar o perfil em tempo real:", err);
+    });
+
+    return () => unsubscribe();
+  }, [user?.email, user?.uid]);
 
   const handleLogin = (authenticatedUser: AuthUser) => {
     setUser(authenticatedUser);
@@ -151,12 +240,12 @@ export default function App() {
           <div className="flex items-center justify-between p-3 bg-slate-800/40 rounded-xl border border-slate-800/50">
             <div className="flex items-center gap-2.5 overflow-hidden">
               <div className="h-8 w-8 shrink-0 rounded-full bg-orange-500/20 border border-orange-500/30 flex items-center justify-center text-orange-400 font-bold text-xs uppercase shadow-inner">
-                {user.name.charAt(0)}{user.name.split(' ')[1]?.charAt(0) || ''}
+                {getInitials(user.name)}
               </div>
               <div className="overflow-hidden text-left">
-                <p className="text-xs font-bold text-white truncate leading-tight flex items-center gap-1">
+                <p className="text-xs font-bold text-white truncate leading-tight flex items-center gap-1" title={user.name}>
                   {user.role === 'ADMIN' && <ShieldCheck className="h-3 w-3 text-orange-400 inline shrink-0" />}
-                  {user.name.split(' ')[0]}
+                  {formatDisplayName(user.name)}
                 </p>
                 <p className="text-[9px] text-slate-400 truncate mt-0.5 leading-none uppercase tracking-wider font-mono">
                   {user.role === 'ADMIN' ? 'Administração' : user.role === 'PROFESSOR' ? 'Docente' : 'Discente Clínico'}
@@ -206,8 +295,8 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2">
-            <div className="h-8 w-8 rounded-full bg-orange-50 border border-orange-100 flex items-center justify-center text-orange-600 font-extrabold text-xs uppercase">
-              {user.name.charAt(0)}
+            <div className="h-8 w-8 rounded-full bg-orange-500/20 border border-orange-500/30 flex items-center justify-center text-orange-400 font-bold text-xs uppercase shadow-inner" title={user.name}>
+              {getInitials(user.name)}
             </div>
             <button
               id="btn-logout-mobile"

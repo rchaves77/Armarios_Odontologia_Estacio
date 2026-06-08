@@ -24,6 +24,14 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
   const [keys, setKeys] = useState<CabinetKey[]>([]);
   const [firebaseUsers, setFirebaseUsers] = useState<Record<string, any>>({});
   const [selectedMapKey, setSelectedMapKey] = useState<CabinetKey | null>(null);
+  const [currentUserName, setCurrentUserName] = useState(user.name);
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [editingNameValue, setEditingNameValue] = useState(user.name);
+
+  // Sync state on prop change
+  useEffect(() => {
+    setCurrentUserName(user.name);
+  }, [user.name]);
   const [search, setSearch] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('todos');
   const [filterBlock, setFilterBlock] = useState<string>('todos');
@@ -206,6 +214,51 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
     setToastMessage(msg);
     setToastType(type);
     setTimeout(() => setToastMessage(null), 5000);
+  };
+
+  const handleSaveName = async () => {
+    if (!editingNameValue.trim()) {
+      triggerToast('O nome não pode estar vazio.', 'alert');
+      return;
+    }
+    const updatedName = editingNameValue.trim().toUpperCase();
+    try {
+      if (user.uid) {
+        await set(ref(rtdb, `usuarios_termos/${user.uid}/name`), updatedName);
+        keys.forEach(async (k) => {
+          if (k.currentLoan && (k.currentLoan.userEmail?.toLowerCase().trim() === user.email.toLowerCase().trim() || k.currentLoan.uid === user.uid)) {
+            await set(ref(rtdb, `armarios/${k.id}/nome`), updatedName);
+          }
+        });
+      }
+
+      const savedUser = localStorage.getItem('unimeta_active_user');
+      if (savedUser) {
+        const parsed = JSON.parse(savedUser);
+        parsed.name = updatedName;
+        localStorage.setItem('unimeta_active_user', JSON.stringify(parsed));
+      }
+
+      const customUsers = JSON.parse(localStorage.getItem('unimeta_custom_users') || '[]');
+      const updatedCustom = customUsers.map((u: any) => {
+        if (u.email?.toLowerCase().trim() === user.email?.toLowerCase().trim() || u.uid === user.uid) {
+          return { ...u, name: updatedName };
+        }
+        return u;
+      });
+      localStorage.setItem('unimeta_custom_users', JSON.stringify(updatedCustom));
+
+      setCurrentUserName(updatedName);
+      setIsEditingName(false);
+      triggerToast('Nome atualizado com sucesso! Sincronizando com o perfil clínico global...');
+      
+      setTimeout(() => {
+        window.location.reload();
+      }, 1500);
+    } catch (err) {
+      console.error(err);
+      triggerToast('Erro ao atualizar o nome no banco de dados.', 'alert');
+    }
   };
 
   // Create Key
@@ -452,10 +505,57 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
       <div className="bg-gradient-to-r from-slate-950 via-slate-900 to-slate-800 rounded-2xl p-6 text-white shadow-lg border border-slate-850 relative overflow-hidden">
         <div className="absolute -right-10 -bottom-10 w-40 h-40 bg-orange-500/10 rounded-full blur-2xl pointer-events-none" />
         <div className="relative flex flex-col md:flex-row md:items-center justify-between gap-4">
-          <div className="space-y-1">
-            <h2 className="text-xl md:text-2xl font-black tracking-tight uppercase flex items-center gap-2">
-              <Smile className="h-6 w-6 text-orange-400 shrink-0" /> Saudações, <span className="text-orange-400">{user.name}</span>!
-            </h2>
+          <div className="space-y-1.5 flex-1">
+            {isEditingName ? (
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 max-w-lg">
+                <input
+                  id="input-name-editor"
+                  type="text"
+                  value={editingNameValue}
+                  onChange={(e) => setEditingNameValue(e.target.value)}
+                  placeholder="Nome Completo (Ex: Rômulo Chaves da Silva)"
+                  className="bg-slate-950 border border-slate-850 focus:border-orange-500 rounded-xl px-3 py-1.5 text-xs text-white uppercase focus:ring-1 focus:ring-orange-500 focus:outline-none flex-1 font-semibold"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleSaveName();
+                  }}
+                />
+                <div id="btn-group-name-edit" className="flex gap-2.5 shrink-0">
+                  <button
+                    id="btn-save-edited-name"
+                    onClick={handleSaveName}
+                    className="bg-orange-600 hover:bg-orange-500 text-white text-xs font-bold px-4.5 py-1.5 rounded-lg transition-all cursor-pointer shadow hover:shadow-orange-950"
+                  >
+                    Salvar
+                  </button>
+                  <button
+                    id="btn-cancel-edited-name"
+                    onClick={() => {
+                      setIsEditingName(false);
+                      setEditingNameValue(currentUserName);
+                    }}
+                    className="bg-slate-850 hover:bg-slate-800 text-slate-300 text-xs px-3.5 py-1.5 rounded-lg transition-colors cursor-pointer border border-slate-800"
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <h2 className="text-xl md:text-2xl font-black tracking-tight uppercase flex items-center gap-2.5 flex-wrap">
+                <Smile className="h-6 w-6 text-orange-400 shrink-0" />
+                <span>Saudações, <span className="text-orange-400 font-black">{currentUserName}</span>!</span>
+                <button
+                  id="btn-start-edit-name"
+                  onClick={() => {
+                    setEditingNameValue(currentUserName);
+                    setIsEditingName(true);
+                  }}
+                  className="text-[9.5px] text-slate-300 hover:text-white font-bold flex items-center gap-1 bg-slate-900/60 hover:bg-slate-900 transition-all border border-slate-800 hover:border-slate-700 px-2.5 py-1 rounded-lg cursor-pointer animate-pulse"
+                  title="Alterar Seu Nome Cadastrado"
+                >
+                  <Edit3 className="h-3 w-3 text-orange-400" /> Ajustar Nome
+                </button>
+              </h2>
+            )}
             <p className="text-xs md:text-sm text-slate-100 font-medium">
               Você está ativo no <strong className="text-white font-bold">Gerenciador de Armários da Clínica de Odontologia Estácio Unimeta</strong>. 
               {user.role === 'ADMIN' ? (

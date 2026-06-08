@@ -175,9 +175,28 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
         return;
       }
 
+      const emailPrefix = cleanEmail.split('@')[0];
+      let rawName = name || emailPrefix.replace('.', ' ');
+      
+      if (!name && emailPrefix.includes('.')) {
+        const parts = emailPrefix.split('.');
+        if (parts.length >= 2) {
+          const firstPart = parts[0].toLowerCase().trim();
+          const commonSurnames = [
+            "silva", "santos", "souza", "sousa", "melo", "costa", "oliveira", 
+            "pereira", "lima", "gomes", "alves", "rodrigues", "chaves", "nascimento", 
+            "barbosa", "ferreira", "carvalho", "gomes", "teixeira", "martins"
+          ];
+          if (commonSurnames.includes(firstPart)) {
+            // Swap to First Name + Surname
+            rawName = `${parts[1]} ${parts[0]}`;
+          }
+        }
+      }
+
       const generatedUser: AuthUser = {
         uid: 'user_' + Date.now(),
-        name: name || cleanEmail.split('@')[0].replace('.', ' '),
+        name: rawName.toUpperCase(),
         email: cleanEmail,
         phone: '(68) 99900-1122',
         role: detected,
