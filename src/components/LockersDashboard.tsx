@@ -449,15 +449,15 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
   return (
     <div className="space-y-6">
       {/* SAUDAÇÃO PERSONALIZADA DO USUÁRIO */}
-      <div className="bg-gradient-to-r from-slate-900 to-slate-850 rounded-2xl p-6 text-white shadow-lg border border-slate-800 relative overflow-hidden">
+      <div className="bg-gradient-to-r from-slate-950 via-slate-900 to-slate-800 rounded-2xl p-6 text-white shadow-lg border border-slate-850 relative overflow-hidden">
         <div className="absolute -right-10 -bottom-10 w-40 h-40 bg-orange-500/10 rounded-full blur-2xl pointer-events-none" />
         <div className="relative flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="space-y-1">
             <h2 className="text-xl md:text-2xl font-black tracking-tight uppercase flex items-center gap-2">
               <Smile className="h-6 w-6 text-orange-400 shrink-0" /> Saudações, <span className="text-orange-400">{user.name}</span>!
             </h2>
-            <p className="text-xs md:text-sm text-slate-300 font-medium">
-              Você está ativo no <strong className="text-white">Gerenciador de Armários da Clínica de Odontologia Estácio Unimeta</strong>. 
+            <p className="text-xs md:text-sm text-slate-100 font-medium">
+              Você está ativo no <strong className="text-white font-bold">Gerenciador de Armários da Clínica de Odontologia Estácio Unimeta</strong>. 
               {user.role === 'ADMIN' ? (
                 " Seu painel de administração geral e central de monitoramento em tempo real está totalmente operacional."
               ) : (
@@ -465,9 +465,9 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
               )}
             </p>
           </div>
-          <div className="flex items-center gap-2 bg-slate-800/65 px-3 py-1.5 rounded-xl border border-slate-700/50 w-fit shrink-0">
-            <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-300">
+          <div className="flex items-center gap-2 bg-slate-900/80 px-3 py-1.5 rounded-xl border border-slate-700/50 w-fit shrink-0">
+            <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-200">
               Sessão: {user.role === 'ADMIN' ? 'Administrador' : user.role === 'PROFESSOR' ? 'Docente' : 'Discente Clínico'}
             </span>
           </div>
