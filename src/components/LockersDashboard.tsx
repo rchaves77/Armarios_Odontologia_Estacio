@@ -27,6 +27,12 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
   const [currentUserName, setCurrentUserName] = useState(user.name);
   const [isEditingName, setIsEditingName] = useState(false);
   const [editingNameValue, setEditingNameValue] = useState(user.name);
+  const [adminSubTab, setAdminSubTab] = useState<'armarios' | 'diretorio' | 'historico_acoes'>('armarios');
+  const [deletingUserUid, setDeletingUserUid] = useState<string | null>(null);
+  const [userSearchText, setUserSearchText] = useState('');
+  const [actionLogs, setActionLogs] = useState<any[]>([]);
+  const [logSearchText, setLogSearchText] = useState('');
+  const [confirmClearLogs, setConfirmClearLogs] = useState(false);
 
   // Sync state on prop change
   useEffect(() => {
@@ -70,6 +76,7 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
   useEffect(() => {
     let unsubscribeArmarios: () => void = () => {};
     let unsubscribeUsuarios: () => void = () => {};
+    let unsubscribeHistorico: () => void = () => {};
 
     // Coordenador de estado de autenticação (evita permission_denied imediato antes das credenciais estarem prontas)
     const unsubscribeAuth = auth.onAuthStateChanged((firebaseUser) => {
@@ -140,6 +147,7 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
         try {
           if (unsubscribeArmarios) unsubscribeArmarios();
           if (unsubscribeUsuarios) unsubscribeUsuarios();
+          if (unsubscribeHistorico) unsubscribeHistorico();
 
           const armariosRef = ref(rtdb, 'armarios');
           unsubscribeArmarios = onValue(armariosRef, (snapshot) => {
@@ -165,6 +173,17 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
               setFirebaseStatus('permission_denied');
               setFirebaseErrorMessage("Permissão negada para ler o nó 'usuarios_termos'.");
             }
+          });
+
+          const historicoRef = ref(rtdb, 'historico_chaves');
+          unsubscribeHistorico = onValue(historicoRef, (snapshot) => {
+            const data = snapshot.val() || {};
+            const logsList = Object.values(data).sort((a: any, b: any) => {
+              return (b.timestamp || '').localeCompare(a.timestamp || '');
+            });
+            setActionLogs(logsList);
+          }, (error) => {
+            console.error("Firebase error loading historico_chaves:", error);
           });
         } catch (e: any) {
           console.error("Erro ao registrar assinaturas no Database:", e);
@@ -202,6 +221,7 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
       unsubscribeAuth();
       unsubscribeArmarios();
       unsubscribeUsuarios();
+      unsubscribeHistorico();
     };
   }, []);
 
@@ -261,6 +281,44 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
     }
   };
 
+  // Delete student registration and release any allocated locker in the Realtime Database
+  const handleDeleteUser = async (uid: string, name: string) => {
+    try {
+      const userObj = firebaseUsers[uid] || {};
+      const userEmail = (userObj.email || '').toLowerCase().trim();
+
+      // Find any active lockers associated with this user
+      const lockersToFree = keys.filter(k => 
+        k.currentLoan && 
+        ((k.currentLoan.uid && k.currentLoan.uid === uid) || 
+         (k.currentLoan.userEmail && k.currentLoan.userEmail.toLowerCase().trim() === userEmail))
+      );
+
+      // Perform synchronous node deletions on the Realtime Database for locker nodes
+      for (const k of lockersToFree) {
+        await remove(ref(rtdb, `armarios/${k.id}`));
+      }
+
+      // Remove the user node entirely from Realtime Database to free up storage
+      await remove(ref(rtdb, `usuarios_termos/${uid}`));
+
+      // Sync custom local storage users array if any
+      try {
+        const customUsers = JSON.parse(localStorage.getItem('unimeta_custom_users') || '[]');
+        const filteredCustom = customUsers.filter((u: any) => u.uid !== uid && u.email?.toLowerCase().trim() !== userEmail);
+        localStorage.setItem('unimeta_custom_users', JSON.stringify(filteredCustom));
+      } catch (errCustom) {
+        console.warn("Could not prune customUsers list:", errCustom);
+      }
+
+      triggerToast(`Estudante "${name.toUpperCase()}" e suas chaves foram removidos com sucesso do Firebase.`);
+      setDeletingUserUid(null);
+    } catch (error: any) {
+      console.error("Erro ao remover estudante:", error);
+      triggerToast("Ocorreu um erro ao excluir esse estudante no Firebase.", "alert");
+    }
+  };
+
   // Create Key
   const handleCreateKey = (e: React.FormEvent) => {
     e.preventDefault();
@@ -305,14 +363,30 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
     }
 
     const dateStr = new Date().toLocaleDateString('pt-BR');
+    const uNameUpper = loanName.trim().toUpperCase();
+    const uEmail = loanEmail.trim().toLowerCase();
+    const uPhone = loanPhone.replace(/\D/g, '');
 
     try {
       set(ref(rtdb, `armarios/${isLoaningKey.id}`), {
         data: dateStr,
-        nome: loanName.trim().toUpperCase(),
-        whats: loanPhone.replace(/\D/g, ''),
+        nome: uNameUpper,
+        whats: uPhone,
         uid: ""
       }).then(() => {
+        // Log action to historico_chaves on Firebase
+        const logId = `log_${Date.now()}`;
+        set(ref(rtdb, `historico_chaves/${logId}`), {
+          id: logId,
+          timestamp: new Date().toISOString().replace('T', ' ').split('.')[0],
+          keyId: isLoaningKey.id,
+          action: 'RETIRADA',
+          userName: uNameUpper,
+          userRole: loanRole,
+          actorName: user.name.toUpperCase(),
+          userEmail: uEmail,
+          userPhone: uPhone
+        });
         triggerToast(`Chave ${isLoaningKey.id} alocada com sucesso no Firebase!`);
       }).catch((err) => {
         console.error("Firebase error loaning key:", err);
@@ -331,7 +405,25 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
   // Perform Devolution (Devolução sincronizada com Firebase)
   const handleReceiveDevolution = (keyId: string) => {
     try {
+      const targetKey = keys.find(k => k.id === keyId);
+      const loanDetails = targetKey?.currentLoan;
+
       remove(ref(rtdb, `armarios/${keyId}`)).then(() => {
+        // Log action to historico_chaves on Firebase
+        if (loanDetails) {
+          const logId = `log_${Date.now()}`;
+          set(ref(rtdb, `historico_chaves/${logId}`), {
+            id: logId,
+            timestamp: new Date().toISOString().replace('T', ' ').split('.')[0],
+            keyId: keyId,
+            action: 'DEVOLUCAO',
+            userName: loanDetails.userName.toUpperCase(),
+            userRole: loanDetails.userRole,
+            actorName: user.name.toUpperCase(),
+            userEmail: loanDetails.userEmail,
+            userPhone: loanDetails.userPhone?.replace(/\D/g, '') || ''
+          });
+        }
         triggerToast(`Delegação finalizada! O armário ${keyId} está livre no Firebase.`);
       }).catch((err) => {
         console.error("Firebase error returning key:", err);
@@ -972,10 +1064,54 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
         </div>
       </div>
 
+      {/* ADMIN SUB-TAB SELECTION */}
+      {isAdmin && (
+        <div id="admin-sub-tabs" className="flex border-b border-slate-200 bg-slate-50/50 rounded-t-xl overflow-hidden">
+          <button
+            id="tab-btn-armarios"
+            type="button"
+            onClick={() => setAdminSubTab('armarios')}
+            className={`flex-1 sm:flex-initial text-center py-3 px-5 font-bold text-xs uppercase tracking-wider border-b-2 transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+              adminSubTab === 'armarios'
+                ? 'border-orange-500 text-orange-600 bg-white'
+                : 'border-transparent text-slate-500 hover:text-slate-800 hover:bg-slate-100/30'
+            }`}
+          >
+            <Key className="h-3.5 w-3.5" /> Armários & Chaves ({keys.length})
+          </button>
+          <button
+            id="tab-btn-diretorio"
+            type="button"
+            onClick={() => setAdminSubTab('diretorio')}
+            className={`flex-1 sm:flex-initial text-center py-3 px-5 font-bold text-xs uppercase tracking-wider border-b-2 transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+              adminSubTab === 'diretorio'
+                ? 'border-orange-500 text-orange-600 bg-white'
+                : 'border-transparent text-slate-500 hover:text-slate-800 hover:bg-slate-100/30'
+            }`}
+          >
+            <Users className="h-3.5 w-3.5" /> Diretório de Alunos Clínica ({Object.keys(firebaseUsers).length})
+          </button>
+          <button
+            id="tab-btn-historico-acoes"
+            type="button"
+            onClick={() => setAdminSubTab('historico_acoes')}
+            className={`flex-1 sm:flex-initial text-center py-3 px-5 font-bold text-xs uppercase tracking-wider border-b-2 transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+              adminSubTab === 'historico_acoes'
+                ? 'border-orange-500 text-orange-600 bg-white'
+                : 'border-transparent text-slate-500 hover:text-slate-800 hover:bg-slate-100/30'
+            }`}
+          >
+            <Clock className="h-3.5 w-3.5" /> Histórico de Ações ({actionLogs.length})
+          </button>
+        </div>
+      )}
+
       {/* FILTER & REGISTRY GRID */}
-      <div className="rounded-xl border border-slate-100 bg-white shadow-xs">
-        {/* Filter header */}
-        <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between border-b border-slate-50">
+      <div className={`border border-slate-100 bg-white shadow-xs ${isAdmin ? 'rounded-b-xl' : 'rounded-xl'}`}>
+        {(!isAdmin || adminSubTab === 'armarios') ? (
+          <>
+            {/* Filter header */}
+            <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between border-b border-slate-50">
           <div className="flex items-center gap-2">
             <Search className="h-4 w-4 text-slate-400" />
             <input
@@ -1260,6 +1396,385 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
             </tbody>
           </table>
         </div>
+          </>
+        ) : adminSubTab === 'diretorio' ? (
+          /* NEW DETAILED DIRECTORY OF REGISTERED CLINICAL STUDENTS FOR ADMINS */
+          <div id="clinical-student-directory" className="p-4 space-y-4">
+            <div className="bg-slate-50 border border-slate-100 rounded-xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
+              <div>
+                <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wide flex items-center gap-1.5">
+                  <Users className="h-4 w-4 text-[#0d47a1]" /> Controle Discente e Limpeza de Prontuários (Firebase)
+                </h4>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Exclua registros de alunos graduados ou inativos para liberar espaço de armazenamento no Firebase. 
+                  <span className="text-red-600 font-medium font-bold"> Se o estudante possuir armário ativo, o armário será desocupado de forma automática.</span>
+                </p>
+              </div>
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-400 font-medium" />
+                <input
+                  id="search-students-directory-input"
+                  type="text"
+                  placeholder="Pesquisar por nome, email ou RA..."
+                  className="rounded-lg border border-slate-200 bg-white pl-9 pr-4 py-1.5 text-xs text-slate-800 focus:outline-none focus:border-orange-500 w-full sm:w-60 font-medium shadow-2xs"
+                  value={userSearchText}
+                  onChange={(e) => setUserSearchText(e.target.value)}
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {Object.entries(firebaseUsers).length === 0 ? (
+                <div className="col-span-full py-12 text-center text-slate-400 font-mono">
+                  Nenhum estudante ou profissional registrado no banco de dados do Firebase.
+                </div>
+              ) : (() => {
+                const term = userSearchText.toLowerCase().trim();
+                const filteredUsers = Object.entries(firebaseUsers).filter(([uid, uData]: [string, any]) => {
+                  if (!uData) return false;
+                  const name = (uData.name || '').toLowerCase();
+                  const email = (uData.email || '').toLowerCase();
+                  const phone = (uData.phone || '').toLowerCase();
+                  const reg = (uData.registrationNumber || '').toLowerCase();
+                  return name.includes(term) || email.includes(term) || phone.includes(term) || reg.includes(term) || uid.toLowerCase().includes(term);
+                });
+
+                if (filteredUsers.length === 0) {
+                  return (
+                    <div className="col-span-full py-8 text-center text-slate-400 italic">
+                      Nenhum discente corresponde aos termos da pesquisa "{userSearchText}".
+                    </div>
+                  );
+                }
+
+                return filteredUsers.map(([uid, uData]: [string, any]) => {
+                  const uName = (uData.name || 'Sem Nome').toUpperCase();
+                  const uEmail = uData.email || 'sem_email@alunos.estacio.br';
+                  const uPhone = uData.phone || 'Sem celular';
+                  const uRole = uData.role || 'ALUNO';
+                  const isUserActiveAdmin = uRole === 'ADMIN';
+                  
+                  // Check if this user holds any physical lockers currently
+                  const activeLocker = keys.find(k => 
+                    k.currentLoan && 
+                    ((k.currentLoan.uid && k.currentLoan.uid === uid) || 
+                     (k.currentLoan.userEmail && k.currentLoan.userEmail.toLowerCase().trim() === uEmail.toLowerCase().trim()))
+                  );
+
+                  return (
+                    <div 
+                      key={uid} 
+                      id={`directory-card-${uid}`} 
+                      className={`rounded-xl border p-4 transition-all hover:bg-slate-50/50 flex flex-col justify-between ${
+                        activeLocker 
+                          ? 'border-orange-200 bg-orange-50/15' 
+                          : 'border-slate-100 bg-white'
+                      }`}
+                    >
+                      <div>
+                        {/* Title and user type */}
+                        <div className="flex items-start justify-between gap-1 gap-x-2">
+                          <div className="overflow-hidden">
+                            <h5 className="font-bold text-slate-800 text-xs truncate uppercase flex items-center gap-1" title={uName}>
+                              {isUserActiveAdmin && <ShieldCheck className="h-3.5 w-3.5 text-orange-500 shrink-0 inline animate-pulse" />}
+                              {uName}
+                            </h5>
+                            <p className="text-[10px] text-slate-400 mt-0.5 font-mono">{uid}</p>
+                          </div>
+                          <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase shrink-0 ${
+                            isUserActiveAdmin 
+                              ? 'bg-orange-100 text-orange-850' 
+                              : uRole === 'PROFESSOR' 
+                                ? 'bg-amber-100 text-amber-850' 
+                                : 'bg-teal-50 text-teal-800'
+                          }`}>
+                            {uRole === 'ADMIN' ? 'Coordenador' : uRole === 'PROFESSOR' ? 'Docente' : 'Discente'}
+                          </span>
+                        </div>
+
+                        {/* Metadata fields */}
+                        <div className="mt-2.5 space-y-1 text-[11px] text-slate-600 font-sans">
+                          <p className="flex items-center gap-1.5">
+                            <Mail className="h-3 w-3 text-slate-400 shrink-0" /> {uEmail}
+                          </p>
+                          <p className="flex items-center gap-1.5">
+                            <Phone className="h-3 w-3 text-slate-400 shrink-0" /> {uPhone}
+                          </p>
+                          {uData.registrationNumber && (
+                            <p className="text-[10px] text-slate-500 font-mono pl-4.5 mt-0.5">
+                              Matrícula (RA): <span className="font-semibold text-slate-700">{uData.registrationNumber}</span>
+                            </p>
+                          )}
+                          {uData.semesterOfEntry && (
+                            <p className="text-[10px] text-slate-500 font-mono pl-4.5">
+                              Entrada: <span className="font-semibold text-slate-700">{uData.semesterOfEntry}</span>
+                            </p>
+                          )}
+                        </div>
+
+                        {/* Locker connection notice */}
+                        {activeLocker && (
+                          <div className="mt-3 bg-orange-50 border border-orange-100 rounded-lg p-2 text-[10px] text-orange-950 flex items-start gap-1.5">
+                            <AlertTriangle className="h-3.5 w-3.5 text-orange-500 shrink-0 mt-0.5 animate-pulse" />
+                            <div>
+                              Possui armário alocado: <strong className="font-bold text-orange-900">{activeLocker.id} ({activeLocker.block})</strong>. Ao remover este aluno, o armário será automaticamente liberado para novos empréstimos.
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Remove or confirmation buttons */}
+                      <div className="mt-4 pt-3 border-t border-slate-100 flex justify-end">
+                        {deletingUserUid === uid ? (
+                          <div className="bg-rose-50 border border-rose-150 rounded-lg p-2 w-full flex items-center justify-between text-[11px]">
+                            <span className="font-bold text-rose-800">Confirmar exclusão permanente?</span>
+                            <div className="flex gap-1.5">
+                              <button
+                                type="button"
+                                id={`btn-confirm-delete-user-yes-${uid}`}
+                                onClick={() => handleDeleteUser(uid, uName)}
+                                className="rounded bg-rose-600 hover:bg-rose-700 font-bold px-2.5 py-1 text-[10px] text-white cursor-pointer"
+                              >
+                                Sim, Deletar
+                              </button>
+                              <button
+                                type="button"
+                                id={`btn-confirm-delete-user-cancel-${uid}`}
+                                onClick={() => setDeletingUserUid(null)}
+                                className="rounded bg-slate-200 hover:bg-slate-350 font-semibold px-2.5 py-1 text-[10px] text-slate-700 cursor-pointer"
+                              >
+                                Cancelar
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            id={`btn-trigger-delete-user-${uid}`}
+                            onClick={() => setDeletingUserUid(uid)}
+                            disabled={uid === user.uid}
+                            title={uid === user.uid ? "Você não pode remover seu próprio cadastro logado." : "Remover aluno clínico"}
+                            className={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-[10px] font-bold border transition-colors ${
+                              uid === user.uid
+                                ? 'bg-slate-50 border-slate-200 text-slate-300 cursor-not-allowed'
+                                : 'bg-white hover:bg-rose-50 border-rose-250 text-rose-600 shadow-sm cursor-pointer'
+                            }`}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" /> Excluir Cadastro (Liberar Memória)
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+          </div>
+        ) : (
+          /* NEW DETAILED ACTION LOGS HISTORY SCREEN FOR ADMINS */
+          <div id="action-logs-history-panel" className="p-4 space-y-4">
+            <div className="bg-slate-50 border border-slate-100 rounded-xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
+              <div>
+                <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wide flex items-center gap-1.5 flex-wrap">
+                  <Clock className="h-4 w-4 text-[#0d47a1]" /> Histórico de Auditoria Clínica e Ações das Chaves
+                </h4>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Acompanhe todas as retiradas e devoluções em tempo real registradas no Firebase Realtime Database. 
+                  Pesquise por aluno, armário, ação ou responsável pelo registro para realizar auditorias.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-400 font-medium" />
+                  <input
+                    id="search-action-logs-input"
+                    type="text"
+                    placeholder="Pesquisar histórico..."
+                    className="rounded-lg border border-slate-200 bg-white pl-9 pr-4 py-1.5 text-xs text-slate-800 focus:outline-none focus:border-orange-500 w-full sm:w-56 font-medium shadow-2xs"
+                    value={logSearchText}
+                    onChange={(e) => setLogSearchText(e.target.value)}
+                  />
+                </div>
+                
+                {/* Export logs to Text button */}
+                <button
+                  type="button"
+                  id="btn-export-logs-csv"
+                  onClick={() => {
+                    if (actionLogs.length === 0) {
+                      triggerToast("Não há logs para exportar.", "alert");
+                      return;
+                    }
+                    const headers = ["ID ID_LOG", "TIMESTAMP DATA_HORA", "ARMARIO_ID", "ACAO_OPERACAO", "NOME_DO_ALUNO", "PROFISSAO_TIPO", "OPERADOR_AUDITOR", "CONTATO_EMAIL", "CONTATO_TELEFONE"];
+                    const rows = actionLogs.map(l => [
+                      l.id,
+                      l.timestamp,
+                      l.keyId,
+                      l.action,
+                      l.userName,
+                      l.userRole,
+                      l.actorName,
+                      l.userEmail || "",
+                      l.userPhone || ""
+                    ]);
+                    
+                    const csvContent = "data:text/csv;charset=utf-8," 
+                      + [headers.join(","), ...rows.map(e => e.map(val => `"${val}"`).join(","))].join("\n");
+                    
+                    const encodedUri = encodeURI(csvContent);
+                    const link = document.createElement("a");
+                    link.setAttribute("href", encodedUri);
+                    link.setAttribute("download", `historico_chaves_clinica_${new Date().toISOString().split('T')[0]}.csv`);
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    triggerToast("Histórico exportado com sucesso.");
+                  }}
+                  className="rounded-lg bg-orange-600 hover:bg-orange-700 text-white font-bold px-3 py-1.8 text-xs cursor-pointer shadow-sm flex items-center gap-1 transition-colors whitespace-nowrap"
+                  title="Exportar Histórico de Chaves para planilha Excel (CSV)"
+                >
+                  <Download className="h-3.5 w-3.5" /> Exportar CSV
+                </button>
+
+                {/* Clear Audit Logs History */}
+                {confirmClearLogs ? (
+                  <div className="flex items-center gap-1.5 bg-rose-50 border border-rose-155 rounded-lg p-1 px-2 whitespace-nowrap">
+                    <span className="text-[10px] font-bold text-rose-800">Confirmar limpeza?</span>
+                    <button
+                      type="button"
+                      id="btn-confirm-wipe-logs-yes"
+                      onClick={() => {
+                        set(ref(rtdb, 'historico_chaves'), null).then(() => {
+                          triggerToast("Histórico de ações limpo com sucesso no Firebase.");
+                          setConfirmClearLogs(false);
+                        }).catch((err) => {
+                          console.error("Erro ao limpar histórico:", err);
+                        });
+                      }}
+                      className="rounded bg-rose-600 hover:bg-rose-700 font-bold px-2 py-0.5 text-[9px] text-white cursor-pointer"
+                    >
+                      Sim
+                    </button>
+                    <button
+                      type="button"
+                      id="btn-confirm-wipe-logs-cancel"
+                      onClick={() => setConfirmClearLogs(false)}
+                      className="rounded bg-slate-200 hover:bg-slate-300 font-medium px-2 py-0.5 text-[9px] text-slate-700 cursor-pointer"
+                    >
+                      Não
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    id="btn-trigger-wipe-logs"
+                    onClick={() => setConfirmClearLogs(true)}
+                    className="rounded-lg bg-white border border-rose-200 hover:bg-rose-50 text-rose-600 font-bold px-3 py-1.8 text-xs cursor-pointer shadow-sm flex items-center gap-1 transition-colors whitespace-nowrap"
+                    title="Limpar todos os logs de ações do Firebase Realtime Database"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" /> Limpar Logs
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Logs Timeline / Table rendering */}
+            <div className="border border-slate-100 rounded-xl overflow-hidden bg-white shadow-xs">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-100 text-slate-500 text-[10px] font-bold uppercase tracking-wider font-mono">
+                      <th className="p-3">Data e Hora (Local)</th>
+                      <th className="p-3 text-center">Armário</th>
+                      <th className="p-3">Operação</th>
+                      <th className="p-3">Beneficiário</th>
+                      <th className="p-3 text-center">Tipo</th>
+                      <th className="p-3">Operador Clínico</th>
+                      <th className="p-3">E-mail / Contato</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-slate-700 text-xs font-medium">
+                    {(() => {
+                      const query = logSearchText.toLowerCase().trim();
+                      const filteredLogs = actionLogs.filter(log => {
+                        const word1 = (log.userName || '').toLowerCase();
+                        const word2 = (log.keyId || '').toLowerCase();
+                        const word3 = (log.action || '').toLowerCase();
+                        const word4 = (log.actorName || '').toLowerCase();
+                        const word5 = (log.userEmail || '').toLowerCase();
+                        return word1.includes(query) || word2.includes(query) || word3.includes(query) || word4.includes(query) || word5.includes(query);
+                      });
+
+                      if (filteredLogs.length === 0) {
+                        return (
+                          <tr>
+                            <td colSpan={7} className="p-8 text-center text-slate-400 italic">
+                              {actionLogs.length === 0 
+                                ? "Nenhum histórico registrado no Firebase Realtime Database."
+                                : `Nenhum log corresponde aos termos de pesquisa "${logSearchText}".`}
+                            </td>
+                          </tr>
+                        );
+                      }
+
+                      return filteredLogs.map((log: any) => {
+                        const isRetirada = log.action === 'RETIRADA';
+                        return (
+                          <tr key={log.id} className="hover:bg-slate-50/50 transition-colors">
+                            <td className="p-3 whitespace-nowrap text-slate-400 font-mono text-[11px]">
+                              {log.timestamp}
+                            </td>
+                            <td className="p-3 text-center whitespace-nowrap hidden sm:table-cell">
+                              <span className="font-extrabold text-slate-800 bg-slate-100 px-2 py-0.5 rounded text-[11px] font-mono">
+                                {log.keyId}
+                              </span>
+                            </td>
+                            {/* Fallback column for mobile / visual element */}
+                            <td className="p-3 text-center whitespace-nowrap sm:hidden">
+                              <span className="font-extrabold text-slate-800 bg-slate-100 px-2 py-0.5 rounded text-[11px] font-mono">
+                                {log.keyId}
+                              </span>
+                            </td>
+                            <td className="p-3 whitespace-nowrap">
+                              <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase ${
+                                isRetirada 
+                                  ? 'bg-emerald-50 text-emerald-800 border border-emerald-250' 
+                                  : 'bg-indigo-50 text-indigo-755 border border-indigo-200'
+                              }`}>
+                                {isRetirada ? 'Retirada' : 'Devolução'}
+                              </span>
+                            </td>
+                            <td className="p-3 font-semibold uppercase text-slate-850 text-[11px] max-w-[170px] truncate" title={log.userName}>
+                              {log.userName}
+                            </td>
+                            <td className="p-3 text-center whitespace-nowrap">
+                              <span className={`px-2 py-0.5 rounded-lg text-[9px] font-bold uppercase ${
+                                log.userRole === 'ADMIN' 
+                                  ? 'bg-orange-50 text-orange-700' 
+                                  : log.userRole === 'PROFESSOR' 
+                                    ? 'bg-amber-50 text-amber-700' 
+                                    : 'bg-teal-50 text-teal-700'
+                              }`}>
+                                {log.userRole === 'ADMIN' ? 'Coordenação' : log.userRole === 'PROFESSOR' ? 'Docente' : 'Discente'}
+                              </span>
+                            </td>
+                            <td className="p-3 text-slate-500 font-medium truncate max-w-[140px]" title={log.actorName}>
+                              {log.actorName}
+                            </td>
+                            <td className="p-3 text-slate-405 font-mono text-[10px]/tight truncate max-w-[180px]" title={log.userEmail}>
+                              <div>{log.userEmail}</div>
+                              {log.userPhone && <div className="text-slate-350">{log.userPhone}</div>}
+                            </td>
+                          </tr>
+                        );
+                      });
+                    })()}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* LOAN DIALOG MODAL FOR OFFICE ADMINS */}
@@ -1587,12 +2102,28 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
                               return;
                             }
                             
+                            const uNameUpper = user.name.toUpperCase();
+                            const uEmail = user.email.toLowerCase().trim();
+                            const uPhone = user.phone.replace(/\D/g, '');
                             set(ref(rtdb, `armarios/${selectedMapKey.id}`), {
                               data: new Date().toLocaleDateString('pt-BR'),
-                              nome: user.name.toUpperCase(),
-                              whats: user.phone.replace(/\D/g, ''),
+                              nome: uNameUpper,
+                              whats: uPhone,
                               uid: user.uid
                             }).then(() => {
+                              // Log direct student reservation 
+                              const logId = `log_${Date.now()}`;
+                              set(ref(rtdb, `historico_chaves/${logId}`), {
+                                id: logId,
+                                timestamp: new Date().toISOString().replace('T', ' ').split('.')[0],
+                                keyId: selectedMapKey.id,
+                                action: 'RETIRADA',
+                                userName: uNameUpper,
+                                userRole: user.role,
+                                actorName: uNameUpper,
+                                userEmail: uEmail,
+                                userPhone: uPhone
+                              });
                               triggerToast(`Armário ${selectedMapKey.id} reservado com sucesso no seu nome!`);
                               setSelectedMapKey(null);
                             }).catch((err) => {
