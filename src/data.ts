@@ -198,40 +198,4 @@ export const DEMO_ADMINS: AuthUser[] = [
   }
 ];
 
-export const DEMO_USERS: AuthUser[] = [
-  {
-    uid: "prof1",
-    name: "Dr. Roberto Cavalcante",
-    email: "roberto.cavalcante@professores.estacio.br",
-    phone: "(68) 99912-3456",
-    role: "PROFESSOR",
-    registrationNumber: "PR-8812"
-  },
-  {
-    uid: "aluno1",
-    name: "Mariana Costa Silva",
-    email: "mariana.silva@alunos.estacio.br",
-    phone: "(68) 99245-1289",
-    role: "ALUNO",
-    semesterOfEntry: "2024.1",
-    registrationNumber: "202401889"
-  },
-  {
-    uid: "aluno2",
-    name: "Thalles Henrique Ramos",
-    email: "thalles.ramos@alunos.estacio.br",
-    phone: "(68) 98401-4433",
-    role: "ALUNO",
-    semesterOfEntry: "2023.2",
-    registrationNumber: "202302199"
-  },
-  {
-    uid: "aluno3",
-    name: "Beatriz Nogueira Lima",
-    email: "beatriz.lima@alunos.estacio.br",
-    phone: "(68) 99201-9988",
-    role: "ALUNO",
-    semesterOfEntry: "2025.1",
-    registrationNumber: "202501004"
-  }
-];
+export const DEMO_USERS: AuthUser[] = [];

@@ -3,12 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Key, Filter, Plus, Search, CheckCircle, RefreshCcw, 
   Send, AlertTriangle, Download, Database, Users, Check, Clock, Trash2, Edit3,
-  User, Mail, Phone, ShieldCheck, Smile
+  User, Mail, Phone, ShieldCheck, Smile, Camera
 } from 'lucide-react';
 import { AuthUser, CabinetKey, LoanDetails, KeyStatus, SyncLog } from '../types';
 import { SEED_KEYS } from '../data';
@@ -55,6 +55,90 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
   const [loanPhone, setLoanPhone] = useState('');
   const [loanRole, setLoanRole] = useState<'ALUNO' | 'PROFESSOR'>('ALUNO');
   const [dueDate, setDueDate] = useState('2026-06-30');
+
+  // Camera & Photo State for Admin Loan and Student direct reservation
+  const [showAdminCamera, setShowAdminCamera] = useState(false);
+  const [adminCapturedSelfie, setAdminCapturedSelfie] = useState<string | null>(null);
+  const [adminCameraLoading, setAdminCameraLoading] = useState(false);
+
+  const [showStudentCamera, setShowStudentCamera] = useState(false);
+  const [studentCapturedSelfie, setStudentCapturedSelfie] = useState<string | null>(null);
+  const [studentCameraLoading, setStudentCameraLoading] = useState(false);
+
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, []);
+
+  const startCameraNode = async (type: 'admin' | 'student') => {
+    if (type === 'admin') {
+      setAdminCameraLoading(true);
+    } else {
+      setStudentCameraLoading(true);
+    }
+    try {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 300, height: 300, facingMode: 'user' }
+      });
+      streamRef.current = stream;
+      if (type === 'admin') {
+        setShowAdminCamera(true);
+      } else {
+        setShowStudentCamera(true);
+      }
+      setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
+      }, 150);
+    } catch (e) {
+      console.error("Camera access failed:", e);
+      triggerToast('Não foi possível acessar a câmera. Por favor libere as permissões.', 'alert');
+    } finally {
+      if (type === 'admin') {
+        setAdminCameraLoading(false);
+      } else {
+        setStudentCameraLoading(false);
+      }
+    }
+  };
+
+  const stopCameraNode = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    setShowAdminCamera(false);
+    setShowStudentCamera(false);
+  };
+
+  const capturePhotoNode = (type: 'admin' | 'student') => {
+    if (videoRef.current) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 300;
+      canvas.height = 300;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(videoRef.current, 0, 0, 300, 300);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+        if (type === 'admin') {
+          setAdminCapturedSelfie(dataUrl);
+        } else {
+          setStudentCapturedSelfie(dataUrl);
+        }
+      }
+      stopCameraNode();
+    }
+  };
 
   // Feedback notifications
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -348,7 +432,7 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
   };
 
   // Perform Loan (Empréstimo sincronizado com Firebase)
-  const handlePerformLoan = (e: React.FormEvent) => {
+  const handlePerformLoan = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!isLoaningKey || !loanName || !loanEmail || !loanPhone) return;
 
@@ -367,39 +451,70 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
     const uEmail = loanEmail.trim().toLowerCase();
     const uPhone = loanPhone.replace(/\D/g, '');
 
+    // Check if recipient has clinical profile photo
+    const matchingEmail = uEmail.toLowerCase().trim();
+    const recipientUser = Object.values(firebaseUsers).find((u: any) => u.email?.toLowerCase().trim() === matchingEmail) as any;
+    const recipientHasPhoto = !!(recipientUser && recipientUser.foto);
+
+    if ((loanRole === 'ALUNO' || loanRole === 'PROFESSOR') && !recipientHasPhoto && !adminCapturedSelfie) {
+      triggerToast('A captura de foto/selfie é obrigatória para este empréstimo.', 'alert');
+      return;
+    }
+
     try {
-      set(ref(rtdb, `armarios/${isLoaningKey.id}`), {
+      const finalUid = recipientUser ? recipientUser.uid : `u_${Date.now()}`;
+
+      // Update or create user profile with photo if needed
+      if (!recipientUser) {
+        // Create user node to register clinical profile with selfie
+        await set(ref(rtdb, `usuarios_termos/${finalUid}`), {
+          uid: finalUid,
+          name: uNameUpper,
+          email: uEmail,
+          phone: uPhone,
+          role: loanRole,
+          registrationNumber: '2026' + Math.floor(1000 + Math.random() * 9000),
+          semesterOfEntry: '2026.1',
+          foto: adminCapturedSelfie || ""
+        });
+      } else if (adminCapturedSelfie) {
+        // Update existing user with photo
+        await set(ref(rtdb, `usuarios_termos/${finalUid}/foto`), adminCapturedSelfie);
+      }
+
+      await set(ref(rtdb, `armarios/${isLoaningKey.id}`), {
         data: dateStr,
         nome: uNameUpper,
         whats: uPhone,
-        uid: ""
-      }).then(() => {
-        // Log action to historico_chaves on Firebase
-        const logId = `log_${Date.now()}`;
-        set(ref(rtdb, `historico_chaves/${logId}`), {
-          id: logId,
-          timestamp: new Date().toISOString().replace('T', ' ').split('.')[0],
-          keyId: isLoaningKey.id,
-          action: 'RETIRADA',
-          userName: uNameUpper,
-          userRole: loanRole,
-          actorName: user.name.toUpperCase(),
-          userEmail: uEmail,
-          userPhone: uPhone
-        });
-        triggerToast(`Chave ${isLoaningKey.id} alocada com sucesso no Firebase!`);
-      }).catch((err) => {
-        console.error("Firebase error loaning key:", err);
-        triggerToast("Erro de gravação no Firebase.", "alert");
+        uid: finalUid
       });
+
+      // Log action to historico_chaves on Firebase
+      const logId = `log_${Date.now()}`;
+      await set(ref(rtdb, `historico_chaves/${logId}`), {
+        id: logId,
+        timestamp: new Date().toISOString().replace('T', ' ').split('.')[0],
+        keyId: isLoaningKey.id,
+        action: 'RETIRADA',
+        userName: uNameUpper,
+        userRole: loanRole,
+        actorName: user.name.toUpperCase(),
+        userEmail: uEmail,
+        userPhone: uPhone
+      });
+
+      triggerToast(`Chave ${isLoaningKey.id} alocada com sucesso no Firebase!`);
     } catch (err) {
-      console.error(err);
+      console.error("Firebase error loaning key:", err);
+      triggerToast("Erro de gravação no Firebase.", "alert");
     }
 
     setIsLoaningKey(null);
     setLoanName('');
     setLoanEmail('');
     setLoanPhone('');
+    setAdminCapturedSelfie(null);
+    setShowAdminCamera(false);
   };
 
   // Perform Devolution (Devolução sincronizada com Firebase)
@@ -1430,13 +1545,129 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
                 </div>
               ) : (() => {
                 const term = userSearchText.toLowerCase().trim();
-                const filteredUsers = Object.entries(firebaseUsers).filter(([uid, uData]: [string, any]) => {
-                  if (!uData) return false;
-                  const name = (uData.name || '').toLowerCase();
-                  const email = (uData.email || '').toLowerCase();
-                  const phone = (uData.phone || '').toLowerCase();
-                  const reg = (uData.registrationNumber || '').toLowerCase();
-                  return name.includes(term) || email.includes(term) || phone.includes(term) || reg.includes(term) || uid.toLowerCase().includes(term);
+
+                // Dynamically resolve values to join information correctly
+                const resolvedUsers = Object.entries(firebaseUsers).map(([uid, uData]: [string, any]) => {
+                  if (!uData) return null;
+                  
+                  const emailRaw = uData.email || '';
+                  const emailClean = emailRaw.toLowerCase().trim();
+                  
+                  // 1. Resolve Name from uData, active keys, historical logs, or email prefix
+                  let uName = (uData.name || uData.nome || uData.nomeCompleto || uData.displayName || '').trim();
+                  if (!uName || uName.toUpperCase() === 'SEM NOME') {
+                    // Search in keys state
+                    const activeK = keys.find(k => 
+                      k.currentLoan && 
+                      ((k.currentLoan.uid && k.currentLoan.uid === uid) || 
+                       (k.currentLoan.userEmail && k.currentLoan.userEmail.toLowerCase().trim() === emailClean))
+                    );
+                    if (activeK && activeK.currentLoan?.userName && activeK.currentLoan.userName !== 'Identificado') {
+                      uName = activeK.currentLoan.userName;
+                    } else {
+                      // Search in action logs
+                      const histLog = actionLogs.find(l => 
+                        (l.uid && l.uid === uid) || 
+                        (l.userEmail && l.userEmail.toLowerCase().trim() === emailClean)
+                      );
+                      if (histLog && histLog.userName) {
+                        uName = histLog.userName;
+                      } else {
+                        // Check custom users in localStorage
+                        const customUsers = JSON.parse(localStorage.getItem('unimeta_custom_users') || '[]');
+                        const matchCustom = customUsers.find((u: any) => 
+                          u.uid === uid || (u.email && u.email.toLowerCase().trim() === emailClean)
+                        );
+                        if (matchCustom && matchCustom.name) {
+                          uName = matchCustom.name;
+                        } else {
+                          // Extract from letters in email address
+                          if (emailClean && !/^\d/.test(emailClean)) {
+                            const prefix = emailClean.split('@')[0];
+                            if (prefix && prefix.includes('.')) {
+                              uName = prefix.split('.').map((s: string) => s.charAt(0).toUpperCase() + s.slice(1)).join(' ');
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                  if (!uName) uName = 'Sem Nome';
+
+                  // 2. Resolve Phone from uData, active keys, historical logs, or custom storage
+                  let uPhone = (uData.phone || uData.celular || uData.whatsapp || uData.whats || '').trim();
+                  if (!uPhone || uPhone === 'Sem celular') {
+                    const activeK = keys.find(k => 
+                      k.currentLoan && 
+                      ((k.currentLoan.uid && k.currentLoan.uid === uid) || 
+                       (k.currentLoan.userEmail && k.currentLoan.userEmail.toLowerCase().trim() === emailClean))
+                    );
+                    if (activeK && activeK.currentLoan?.userPhone && activeK.currentLoan.userPhone !== 'Sem celular' && activeK.currentLoan.userPhone !== '(68) 99999-9999') {
+                      uPhone = activeK.currentLoan.userPhone;
+                    } else {
+                      const histLog = actionLogs.find(l => 
+                        (l.uid && l.uid === uid) || 
+                        (l.userEmail && l.userEmail.toLowerCase().trim() === emailClean)
+                      );
+                      if (histLog && histLog.userPhone) {
+                        uPhone = histLog.userPhone;
+                      } else {
+                        const customUsers = JSON.parse(localStorage.getItem('unimeta_custom_users') || '[]');
+                        const matchCustom = customUsers.find((u: any) => 
+                          u.uid === uid || (u.email && u.email.toLowerCase().trim() === emailClean)
+                        );
+                        if (matchCustom && matchCustom.phone) {
+                          uPhone = matchCustom.phone;
+                        }
+                      }
+                    }
+                  }
+                  if (!uPhone) uPhone = 'Sem celular';
+
+                  // 3. Resolve Registration Number
+                  let uReg = (uData.registrationNumber || uData.matricula || uData.ra || uData.docenteId || uData.idDocente || '').trim();
+                  if (!uReg) {
+                    const customUsers = JSON.parse(localStorage.getItem('unimeta_custom_users') || '[]');
+                    const matchCustom = customUsers.find((u: any) => 
+                      u.uid === uid || (u.email && u.email.toLowerCase().trim() === emailClean)
+                    );
+                    if (matchCustom && matchCustom.registrationNumber) {
+                      uReg = matchCustom.registrationNumber;
+                    } else if (emailClean) {
+                      const prefix = emailClean.split('@')[0];
+                      if (/^\d+$/.test(prefix)) {
+                        uReg = prefix;
+                      }
+                    }
+                  }
+
+                  // 4. Resolve Role
+                  let uRole = uData.role || 'ALUNO';
+                  if (emailClean && emailClean.endsWith('@estacio.br') && !emailClean.includes('alunos')) {
+                    uRole = 'PROFESSOR';
+                    if (emailClean.includes('luciana.mendonca') || emailClean.includes('recepcao')) {
+                      uRole = 'ADMIN';
+                    }
+                  }
+
+                  return {
+                    uid,
+                    name: uName.toUpperCase(),
+                    email: emailRaw || `${uid.substring(0, 8)}@alunos.estacio.br`,
+                    phone: uPhone,
+                    registrationNumber: uReg,
+                    semesterOfEntry: uData.semesterOfEntry || '2026.1',
+                    role: uRole,
+                    foto: uData.foto || null
+                  };
+                }).filter(Boolean) as any[];
+
+                const filteredUsers = resolvedUsers.filter(u => {
+                  return u.name.toLowerCase().includes(term) || 
+                         u.email.toLowerCase().includes(term) || 
+                         u.phone.toLowerCase().includes(term) || 
+                         u.registrationNumber.toLowerCase().includes(term) || 
+                         u.uid.toLowerCase().includes(term);
                 });
 
                 if (filteredUsers.length === 0) {
@@ -1447,11 +1678,12 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
                   );
                 }
 
-                return filteredUsers.map(([uid, uData]: [string, any]) => {
-                  const uName = (uData.name || 'Sem Nome').toUpperCase();
-                  const uEmail = uData.email || 'sem_email@alunos.estacio.br';
-                  const uPhone = uData.phone || 'Sem celular';
-                  const uRole = uData.role || 'ALUNO';
+                return filteredUsers.map((uResolved: any) => {
+                  const uid = uResolved.uid;
+                  const uName = uResolved.name;
+                  const uEmail = uResolved.email;
+                  const uPhone = uResolved.phone;
+                  const uRole = uResolved.role;
                   const isUserActiveAdmin = uRole === 'ADMIN';
                   
                   // Check if this user holds any physical lockers currently
@@ -1500,14 +1732,14 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
                           <p className="flex items-center gap-1.5">
                             <Phone className="h-3 w-3 text-slate-400 shrink-0" /> {uPhone}
                           </p>
-                          {uData.registrationNumber && (
+                          {uResolved.registrationNumber && (
                             <p className="text-[10px] text-slate-500 font-mono pl-4.5 mt-0.5">
-                              Matrícula (RA): <span className="font-semibold text-slate-700">{uData.registrationNumber}</span>
+                              Matrícula (RA): <span className="font-semibold text-slate-700">{uResolved.registrationNumber}</span>
                             </p>
                           )}
-                          {uData.semesterOfEntry && (
+                          {uResolved.semesterOfEntry && (
                             <p className="text-[10px] text-slate-500 font-mono pl-4.5">
-                              Entrada: <span className="font-semibold text-slate-700">{uData.semesterOfEntry}</span>
+                              Entrada: <span className="font-semibold text-slate-700">{uResolved.semesterOfEntry}</span>
                             </p>
                           )}
                         </div>
@@ -1891,6 +2123,89 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
                   />
                 </div>
 
+                {(() => {
+                  const matchingEmail = loanEmail.toLowerCase().trim();
+                  const recipientUser = Object.values(firebaseUsers).find((u: any) => u.email?.toLowerCase().trim() === matchingEmail) as any;
+                  const recipientHasPhoto = !!(recipientUser && recipientUser.foto);
+                  
+                  return (loanRole === 'ALUNO' || loanRole === 'PROFESSOR') && loanEmail.includes('@') && !recipientHasPhoto ? (
+                    <div className="bg-orange-50/50 p-3 rounded-xl border border-orange-100 space-y-2 mt-2">
+                      <p className="text-[10px] text-orange-700 font-bold flex items-center gap-1">
+                        <Smile className="h-3.5 w-3.5 text-orange-600 animate-pulse" />
+                        Foto de Identificação Mandatória *
+                      </p>
+                      <p className="text-[9px] text-slate-500 leading-normal">
+                        O portador <strong>{loanEmail}</strong> não possui foto de selfie vinculada ao perfil global da Estácio. <strong>A captura duma selfie é obrigatória para liberar a chave.</strong>
+                      </p>
+
+                      {showAdminCamera ? (
+                        <div className="space-y-2">
+                          <div className="relative overflow-hidden rounded-lg border border-slate-200 bg-black aspect-square max-w-[150px] mx-auto">
+                            <video 
+                              ref={videoRef} 
+                              autoPlay 
+                              playsInline 
+                              muted 
+                              className="w-full h-full object-cover" 
+                            />
+                          </div>
+                          <div className="flex gap-2 justify-center">
+                            <button
+                              id="btn-admin-capture"
+                              type="button"
+                              onClick={() => capturePhotoNode('admin')}
+                              className="px-3 py-1 bg-green-600 hover:bg-green-700 text-white rounded font-bold text-[10px] cursor-pointer"
+                            >
+                              Tirar Foto
+                            </button>
+                            <button
+                              id="btn-admin-cancel-cam"
+                              type="button"
+                              onClick={stopCameraNode}
+                              className="px-3 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded font-bold text-[10px] cursor-pointer"
+                            >
+                              Cancelar
+                            </button>
+                          </div>
+                        </div>
+                      ) : adminCapturedSelfie ? (
+                        <div className="space-y-2 text-center">
+                          <div className="relative overflow-hidden rounded-lg border border-slate-200 bg-slate-100 aspect-square max-w-[100px] mx-auto">
+                            <img 
+                              src={adminCapturedSelfie} 
+                              alt="Selfie do portador" 
+                              className="w-full h-full object-cover"
+                              referrerPolicy="no-referrer"
+                            />
+                          </div>
+                          <p className="text-[9px] text-emerald-700 font-bold">✓ Foto capturada!</p>
+                          <div className="flex gap-2 justify-center">
+                            <button
+                              id="btn-admin-retake"
+                              type="button"
+                              onClick={() => startCameraNode('admin')}
+                              className="px-2 py-0.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded text-[9px] cursor-pointer"
+                            >
+                              Capturar Novamente
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          id="btn-admin-start-cam"
+                          type="button"
+                          onClick={() => startCameraNode('admin')}
+                          disabled={adminCameraLoading}
+                          className="w-full rounded bg-orange-600 hover:bg-orange-700 text-white font-bold py-1.5 text-[10px] inline-flex items-center justify-center gap-1 cursor-pointer"
+                        >
+                          <Camera className="h-3 w-3" />
+                          {adminCameraLoading ? 'Ativando Câmera...' : 'Ativar Câmera e Capturar Foto'}
+                        </button>
+                      )}
+                    </div>
+                  ) : null;
+                })()}
+
                 <div className="flex gap-2 pt-2">
                   <button
                     id="btn-confirm-loan-submit"
@@ -1974,7 +2289,7 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
                       const userPhoto = getOccupantPhoto();
                       const rawDigits = selectedMapKey.currentLoan.userPhone.replace(/\D/g, '');
                       const waPhone = rawDigits.startsWith('55') ? rawDigits : `55${rawDigits}`;
-                      const waText = encodeURIComponent(`Olá, ${selectedMapKey.currentLoan.userName}! Sou o admin da Gestão de Chaves de Odontologia Estácio Unimeta. Lembro que você está com a chave do armário ${selectedMapKey.id}. Quando concluir suas atividades clínicas, favor realizar a devolução na secretaria. Obrigado!`);
+                      const waText = encodeURIComponent(`Olá, ${selectedMapKey.currentLoan.userName}! Sou o admin da Gestão de Chaves de Odontologia Estácio Unimeta. Lembro que você está com a chave do armário ${selectedMapKey.id}. Quando concluir suas atividades clínicas, favor realizar a devolução na recepção da clínica escola. Obrigado!`);
                       const waUrl = `https://api.whatsapp.com/send?phone=${waPhone}&text=${waText}`;
 
                       return (
@@ -2090,51 +2405,195 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
                     <p className="text-[10px] text-slate-400">O armário está limpo e disponível para novas alocações clínicas.</p>
                     
                     {!isAdmin && (
-                      <div className="pt-3 border-t border-slate-100 mt-3 space-y-2">
-                        <p className="text-[11px] text-orange-600 font-bold">Deseja reservar o armário {selectedMapKey.id} para você?</p>
-                        <button
-                          id="btn-student-reserve-directly"
-                          type="button"
-                          onClick={() => {
-                            const hasLocker = keys.some(k => k.currentLoan && k.currentLoan.userEmail?.toLowerCase().trim() === user.email.toLowerCase().trim());
-                            if (hasLocker) {
-                              triggerToast("Você já possui um armário reservado na clínica! Devolva o seu armário anterior para prosseguir.", "alert");
-                              return;
-                            }
-                            
-                            const uNameUpper = user.name.toUpperCase();
-                            const uEmail = user.email.toLowerCase().trim();
-                            const uPhone = user.phone.replace(/\D/g, '');
-                            set(ref(rtdb, `armarios/${selectedMapKey.id}`), {
-                              data: new Date().toLocaleDateString('pt-BR'),
-                              nome: uNameUpper,
-                              whats: uPhone,
-                              uid: user.uid
-                            }).then(() => {
-                              // Log direct student reservation 
-                              const logId = `log_${Date.now()}`;
-                              set(ref(rtdb, `historico_chaves/${logId}`), {
-                                id: logId,
-                                timestamp: new Date().toISOString().replace('T', ' ').split('.')[0],
-                                keyId: selectedMapKey.id,
-                                action: 'RETIRADA',
-                                userName: uNameUpper,
-                                userRole: user.role,
-                                actorName: uNameUpper,
-                                userEmail: uEmail,
-                                userPhone: uPhone
-                              });
-                              triggerToast(`Armário ${selectedMapKey.id} reservado com sucesso no seu nome!`);
-                              setSelectedMapKey(null);
-                            }).catch((err) => {
-                              console.error(err);
-                              triggerToast("Erro ao efetuar reserva no Firebase.", "alert");
-                            });
-                          }}
-                          className="w-full rounded bg-orange-600 hover:bg-orange-700 text-white font-extrabold py-2 text-xs transition-colors cursor-pointer shadow-md inline-flex items-center justify-center gap-1.5"
-                        >
-                          <Key className="h-3.5 w-3.5" /> Reservar este Armário
-                        </button>
+                      <div className="pt-3 border-t border-slate-100 mt-3 space-y-2 text-left">
+                        <p className="text-[11px] text-orange-600 font-bold text-center">Deseja reservar o armário {selectedMapKey.id} para você?</p>
+                        {(() => {
+                          const currentProfile = firebaseUsers[user.uid];
+                          const hasPhoto = !!(currentProfile && currentProfile.foto);
+                          
+                          if (!hasPhoto) {
+                            return (
+                              <div className="bg-orange-50/50 p-3 rounded-lg border border-orange-100 space-y-2 mt-1">
+                                <p className="text-[10px] text-orange-700 font-medium leading-relaxed">
+                                  ⚠️ <strong>Foto de Identificação Obrigatória:</strong> Identificamos que você ainda não tem uma foto de selfie cadastrada em seu perfil. Para receber chaves no semestre, você deve capturar uma foto facial de selfie.
+                                </p>
+                                
+                                {showStudentCamera ? (
+                                  <div className="space-y-2">
+                                    <div className="relative overflow-hidden rounded-lg border border-slate-200 bg-black aspect-square max-w-[200px] mx-auto">
+                                      <video 
+                                        ref={videoRef} 
+                                        autoPlay 
+                                        playsInline 
+                                        muted 
+                                        className="w-full h-full object-cover" 
+                                      />
+                                    </div>
+                                    <div className="flex gap-2 justify-center">
+                                      <button
+                                        id="btn-student-capture"
+                                        type="button"
+                                        onClick={() => capturePhotoNode('student')}
+                                        className="px-3 py-1 bg-green-600 hover:bg-green-700 text-white rounded font-bold text-[10px] cursor-pointer"
+                                      >
+                                        Tirar Foto
+                                      </button>
+                                      <button
+                                        id="btn-student-cancel-cam"
+                                        type="button"
+                                        onClick={stopCameraNode}
+                                        className="px-3 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded font-bold text-[10px] cursor-pointer"
+                                      >
+                                        Cancelar
+                                      </button>
+                                    </div>
+                                  </div>
+                                ) : studentCapturedSelfie ? (
+                                  <div className="space-y-2 text-center">
+                                    <div className="relative overflow-hidden rounded-lg border border-slate-200 bg-slate-100 aspect-square max-w-[120px] mx-auto">
+                                      <img 
+                                        src={studentCapturedSelfie} 
+                                        alt="Selfie capturada" 
+                                        className="w-full h-full object-cover"
+                                        referrerPolicy="no-referrer"
+                                      />
+                                    </div>
+                                    <p className="text-[9px] text-slate-500">Foto capturada com sucesso!</p>
+                                    <div className="flex gap-2 justify-center">
+                                      <button
+                                        id="btn-student-retake"
+                                        type="button"
+                                        onClick={() => startCameraNode('student')}
+                                        className="px-2 py-0.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded text-[9px] cursor-pointer"
+                                      >
+                                        Refazer Foto
+                                      </button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <button
+                                    id="btn-student-start-cam"
+                                    type="button"
+                                    onClick={() => startCameraNode('student')}
+                                    disabled={studentCameraLoading}
+                                    className="w-full rounded bg-orange-600 hover:bg-orange-700 text-white font-bold py-1.5 text-[11px] inline-flex items-center justify-center gap-1 cursor-pointer"
+                                  >
+                                    <Camera className="h-3 w-3" />
+                                    {studentCameraLoading ? 'Iniciando câmera...' : 'Capturar Foto de Selfie'}
+                                  </button>
+                                )}
+                                
+                                {studentCapturedSelfie && (
+                                  <button
+                                    id="btn-student-reserve-directly"
+                                    type="button"
+                                    onClick={async () => {
+                                      const hasLocker = keys.some(k => k.currentLoan && k.currentLoan.userEmail?.toLowerCase().trim() === user.email.toLowerCase().trim());
+                                      if (hasLocker) {
+                                        triggerToast("Você já possui um armário reservado na clínica! Devolva o seu armário anterior para prosseguir.", "alert");
+                                        return;
+                                      }
+                                      
+                                      try {
+                                        // 1. Save photo to profile in RTDB
+                                        await set(ref(rtdb, `usuarios_termos/${user.uid}/foto`), studentCapturedSelfie);
+                                        
+                                        // Update local storage cache
+                                        const currentCustom = JSON.parse(localStorage.getItem('unimeta_custom_users') || '[]');
+                                        const idx = currentCustom.findIndex((u: any) => u.uid === user.uid);
+                                        if (idx !== -1) {
+                                          currentCustom[idx].foto = studentCapturedSelfie;
+                                          localStorage.setItem('unimeta_custom_users', JSON.stringify(currentCustom));
+                                        }
+                                      } catch (err) {
+                                        console.error("Erro ao salvar foto no cadastro:", err);
+                                      }
+
+                                      // 2. Perform reservation
+                                      const uNameUpper = user.name.toUpperCase();
+                                      const uEmail = user.email.toLowerCase().trim();
+                                      const uPhone = user.phone.replace(/\D/g, '');
+                                      set(ref(rtdb, `armarios/${selectedMapKey.id}`), {
+                                        data: new Date().toLocaleDateString('pt-BR'),
+                                        nome: uNameUpper,
+                                        whats: uPhone,
+                                        uid: user.uid
+                                      }).then(() => {
+                                        const logId = `log_${Date.now()}`;
+                                        set(ref(rtdb, `historico_chaves/${logId}`), {
+                                          id: logId,
+                                          timestamp: new Date().toISOString().replace('T', ' ').split('.')[0],
+                                          keyId: selectedMapKey.id,
+                                          action: 'RETIRADA',
+                                          userName: uNameUpper,
+                                          userRole: user.role,
+                                          actorName: uNameUpper,
+                                          userEmail: uEmail,
+                                          userPhone: uPhone
+                                        });
+                                        triggerToast(`Armário ${selectedMapKey.id} reservado com sucesso no seu nome!`);
+                                        setStudentCapturedSelfie(null);
+                                        setShowStudentCamera(false);
+                                        setSelectedMapKey(null);
+                                      }).catch((err) => {
+                                        console.error(err);
+                                        triggerToast("Erro ao efetuar reserva no Firebase.", "alert");
+                                      });
+                                    }}
+                                    className="w-full rounded bg-green-600 hover:bg-green-700 text-white font-extrabold py-2 text-xs transition-colors cursor-pointer shadow-md inline-flex items-center justify-center gap-1.5 mt-2 animate-bounce"
+                                  >
+                                    <Key className="h-3.5 w-3.5" /> Salvar Selfie & Reservar Armário
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          }
+
+                          return (
+                            <button
+                              id="btn-student-reserve-directly"
+                              type="button"
+                              onClick={() => {
+                                const hasLocker = keys.some(k => k.currentLoan && k.currentLoan.userEmail?.toLowerCase().trim() === user.email.toLowerCase().trim());
+                                if (hasLocker) {
+                                  triggerToast("Você já possui um armário reservado na clínica! Devolva o seu armário anterior para prosseguir.", "alert");
+                                  return;
+                                }
+                                
+                                const uNameUpper = user.name.toUpperCase();
+                                const uEmail = user.email.toLowerCase().trim();
+                                const uPhone = user.phone.replace(/\D/g, '');
+                                set(ref(rtdb, `armarios/${selectedMapKey.id}`), {
+                                  data: new Date().toLocaleDateString('pt-BR'),
+                                  nome: uNameUpper,
+                                  whats: uPhone,
+                                  uid: user.uid
+                                }).then(() => {
+                                  const logId = `log_${Date.now()}`;
+                                  set(ref(rtdb, `historico_chaves/${logId}`), {
+                                    id: logId,
+                                    timestamp: new Date().toISOString().replace('T', ' ').split('.')[0],
+                                    keyId: selectedMapKey.id,
+                                    action: 'RETIRADA',
+                                    userName: uNameUpper,
+                                    userRole: user.role,
+                                    actorName: uNameUpper,
+                                    userEmail: uEmail,
+                                    userPhone: uPhone
+                                  });
+                                  triggerToast(`Armário ${selectedMapKey.id} reservado com sucesso no seu nome!`);
+                                  setSelectedMapKey(null);
+                                }).catch((err) => {
+                                  console.error(err);
+                                  triggerToast("Erro ao efetuar reserva no Firebase.", "alert");
+                                });
+                              }}
+                              className="w-full rounded bg-orange-600 hover:bg-orange-700 text-white font-extrabold py-2 text-xs transition-colors cursor-pointer shadow-md inline-flex items-center justify-center gap-1.5"
+                            >
+                              <Key className="h-3.5 w-3.5" /> Reservar este Armário
+                            </button>
+                          );
+                        })()}
                       </div>
                     )}
                   </div>
@@ -2208,34 +2667,64 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
             </p>
 
             <div className="space-y-3 max-h-[300px] overflow-y-auto pr-1">
-              {[
-                { name: "Mariana Costa Silva", email: "mariana.silva@alunos.estacio.br", phone: "(68) 99245-1289", role: "ALUNO", detail: "Semestre: 2024.1 | Matrícula: 202401889" },
-                { name: "Thalles Henrique Ramos", email: "thalles.ramos@alunos.estacio.br", phone: "(68) 98401-4433", role: "ALUNO", detail: "Semestre: 2023.2 | Matrícula: 202302199" },
-                { name: "Beatriz Nogueira Lima", email: "beatriz.lima@alunos.estacio.br", phone: "(68) 99201-9988", role: "ALUNO", detail: "Semestre: 2025.1 | Matrícula: 202501004" },
-                { name: "Dr. Roberto Cavalcante", email: "roberto.cavalcante@professores.estacio.br", phone: "(68) 99912-3456", role: "PROFESSOR", detail: "ID Docente: PR-8812 (Dentística)" },
-                ...JSON.parse(localStorage.getItem('unimeta_custom_users') || '[]').map((u: any) => ({
+              {(() => {
+                const customUsers = JSON.parse(localStorage.getItem('unimeta_custom_users') || '[]').map((u: any) => ({
                   name: u.name,
                   email: u.email,
                   phone: u.phone,
                   role: u.role,
                   detail: u.role === 'ALUNO' ? `Semestre: ${u.semesterOfEntry || '2026.1'} | Matrícula: ${u.registrationNumber || ''}` : `Matrícula: ${u.registrationNumber || ''}`
-                }))
-              ].map((student, sidx) => (
-                <div key={sidx} className="p-3 bg-slate-50 rounded-lg flex flex-col sm:flex-row sm:items-center sm:justify-between border border-slate-100 gap-2">
-                  <div className="space-y-1">
-                    <p className="font-bold text-slate-800 text-xs flex items-center gap-1.5">
-                      {student.name}
-                      <span className={`text-[8px] font-bold px-1.5 rounded ${
-                        student.role === 'PROFESSOR' ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-800'
-                      }`}>
-                        {student.role}
-                      </span>
-                    </p>
-                    <p className="text-[10px] text-slate-600 font-mono">E-mail: {student.email} | Cel: {student.phone}</p>
-                    <p className="text-[9px] text-slate-400 font-medium">{student.detail}</p>
+                }));
+
+                const dbUsers = Object.entries(firebaseUsers).map(([_, u]: [string, any]) => ({
+                  name: u.name || '',
+                  email: u.email || '',
+                  phone: u.phone || '',
+                  role: u.role || 'ALUNO',
+                  detail: u.role === 'PROFESSOR' 
+                    ? `ID Docente: ${u.registrationNumber || ''}` 
+                    : `Semestre: ${u.semesterOfEntry || ''} | Matrícula: ${u.registrationNumber || ''}`
+                }));
+
+                // Combine them, removing any duplicates by email
+                const allUsers: any[] = [];
+                const seenEmails = new Set<string>();
+
+                [...customUsers, ...dbUsers].forEach(u => {
+                  const emailKey = (u.email || '').toLowerCase().trim();
+                  if (emailKey && !seenEmails.has(emailKey)) {
+                    seenEmails.add(emailKey);
+                    allUsers.push(u);
+                  } else if (!emailKey) {
+                    allUsers.push(u);
+                  }
+                });
+
+                if (allUsers.length === 0) {
+                  return (
+                    <div className="p-4 text-center text-slate-400 italic text-[11px] font-mono">
+                      Nenhum discente ou docente cadastrado no banco de dados.
+                    </div>
+                  );
+                }
+
+                return allUsers.map((student, sidx) => (
+                  <div key={sidx} className="p-3 bg-slate-50 rounded-lg flex flex-col sm:flex-row sm:items-center sm:justify-between border border-slate-100 gap-2">
+                    <div className="space-y-1">
+                      <p className="font-bold text-slate-800 text-xs flex items-center gap-1.5">
+                        {student.name}
+                        <span className={`text-[8px] font-bold px-1.5 rounded ${
+                          student.role === 'PROFESSOR' ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-800'
+                        }`}>
+                          {student.role}
+                        </span>
+                      </p>
+                      <p className="text-[10px] text-slate-600 font-mono">E-mail: {student.email} | Cel: {student.phone}</p>
+                      <p className="text-[9px] text-slate-400 font-medium">{student.detail}</p>
+                    </div>
                   </div>
-                </div>
-              ))}
+                ));
+              })()}
             </div>
           </div>
 
