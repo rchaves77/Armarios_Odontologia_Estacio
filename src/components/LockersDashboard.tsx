@@ -2289,7 +2289,7 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
                       const userPhoto = getOccupantPhoto();
                       const rawDigits = selectedMapKey.currentLoan.userPhone.replace(/\D/g, '');
                       const waPhone = rawDigits.startsWith('55') ? rawDigits : `55${rawDigits}`;
-                      const waText = encodeURIComponent(`Olá, ${selectedMapKey.currentLoan.userName}! Sou o admin da Gestão de Chaves de Odontologia Estácio Unimeta. Lembro que você está com a chave do armário ${selectedMapKey.id}. Quando concluir suas atividades clínicas, favor realizar a devolução na recepção da clínica escola. Obrigado!`);
+                      const waText = encodeURIComponent(`Olá, ${selectedMapKey.currentLoan.userName}! Sou o admin da Gestão de Chaves de Odontologia Estácio Unimeta. Lembro que você está com a chave do armário ${selectedMapKey.id}. Quando concluir suas atividades clínicas, favor realizar a devolução na recepção da clínica de odontologia. Obrigado!`);
                       const waUrl = `https://api.whatsapp.com/send?phone=${waPhone}&text=${waText}`;
 
                       return (
