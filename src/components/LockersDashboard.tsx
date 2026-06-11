@@ -16,6 +16,29 @@ import { ref, onValue, set, remove } from 'firebase/database';
 import { signInAnonymously } from 'firebase/auth';
 import { rtdb, auth } from '../firebase';
 
+// Helper utilities for beautiful, robust accents-free search supporting multi-word matching out of order
+const normalizeString = (str: string): string => {
+  return (str || '')
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+};
+
+const isSearchMatch = (targetFields: string[], searchText: string): boolean => {
+  const normSearch = normalizeString(searchText);
+  if (!normSearch) return true;
+  
+  // Split search terms by spaces to allow searching first names, last names, or subsets in any order
+  const searchWords = normSearch.split(/\s+/).filter(Boolean);
+  const normFields = targetFields.map(f => normalizeString(f));
+  
+  // Every typed word must be contained in at least one of the target fields
+  return searchWords.every(word => {
+    return normFields.some(field => field.includes(word));
+  });
+};
+
 interface LockersDashboardProps {
   user: AuthUser;
 }
@@ -692,8 +715,14 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
 
   // Filter logic
   const filteredKeys = keys.filter(k => {
-    const matchesSearch = k.id.toLowerCase().includes(search.toLowerCase()) || 
-                          k.block.toLowerCase().includes(search.toLowerCase());
+    const searchFields = [
+      k.id,
+      k.block || '',
+      k.currentLoan?.userName || '',
+      k.currentLoan?.userEmail || '',
+      k.currentLoan?.userPhone || ''
+    ];
+    const matchesSearch = isSearchMatch(searchFields, search);
     const matchesStatus = filterStatus === 'todos' || k.status === filterStatus;
     const matchesBlock = filterBlock === 'todos' || k.block === filterBlock;
     return matchesSearch && matchesStatus && matchesBlock;
@@ -1663,11 +1692,7 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
                 }).filter(Boolean) as any[];
 
                 const filteredUsers = resolvedUsers.filter(u => {
-                  return u.name.toLowerCase().includes(term) || 
-                         u.email.toLowerCase().includes(term) || 
-                         u.phone.toLowerCase().includes(term) || 
-                         u.registrationNumber.toLowerCase().includes(term) || 
-                         u.uid.toLowerCase().includes(term);
+                  return isSearchMatch([u.name, u.email, u.phone, u.registrationNumber, u.uid], userSearchText);
                 });
 
                 if (filteredUsers.length === 0) {
@@ -1927,14 +1952,15 @@ export default function LockersDashboard({ user }: LockersDashboardProps) {
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-slate-700 text-xs font-medium">
                     {(() => {
-                      const query = logSearchText.toLowerCase().trim();
                       const filteredLogs = actionLogs.filter(log => {
-                        const word1 = (log.userName || '').toLowerCase();
-                        const word2 = (log.keyId || '').toLowerCase();
-                        const word3 = (log.action || '').toLowerCase();
-                        const word4 = (log.actorName || '').toLowerCase();
-                        const word5 = (log.userEmail || '').toLowerCase();
-                        return word1.includes(query) || word2.includes(query) || word3.includes(query) || word4.includes(query) || word5.includes(query);
+                        return isSearchMatch([
+                          log.userName || '',
+                          log.keyId || '',
+                          log.action || '',
+                          log.actorName || '',
+                          log.userEmail || '',
+                          log.userPhone || ''
+                        ], logSearchText);
                       });
 
                       if (filteredLogs.length === 0) {
